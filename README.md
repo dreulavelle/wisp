@@ -97,6 +97,13 @@ curl -X DELETE http://localhost:8080/api/pins -d '{"imdb_id":"tt38262097","seaso
 | `WISP_MOUNT_ALLOW_OTHER` | `true` | Let other UIDs read the mount |
 | `WISP_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, or `error` |
 
+## Documentation
+
+Full docs live in [`docs/`](docs/README.md): [Architecture](docs/Architecture.md) ·
+[API](docs/API-Reference.md) · [Configuration](docs/Configuration.md) ·
+[Deployment](docs/Deployment.md) · [Feeding wisp](docs/Feeding-wisp.md) ·
+[Troubleshooting](docs/Troubleshooting.md).
+
 ## Status
 
 Early. The core — add, pin, serve, self-heal, and in-process mount — works.
