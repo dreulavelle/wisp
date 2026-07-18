@@ -155,6 +155,12 @@ curl -X DELETE http://localhost:8080/api/pins -d '{"imdb_id":"tt38262097","seaso
 curl -X DELETE http://localhost:8080/api/pins -d '{"imdb_id":"tt38262097","season":1,"episode":4,"quality":"2160p"}'
 ```
 
+## Persistent monitoring
+
+Wisp can retain movie and series requests independently of any media server. It retries unavailable movies and discovers newly aired episodes every two hours. Cinemeta supplies canonical Stremio episode numbering, TVMaze refines matching air times and acts as fallback, and an optional TMDB key gates movies on digital or physical releases in the configured markets.
+
+Use `POST /api/monitors` to add a movie or series, `GET /api/monitors` to inspect the queue, `POST /api/monitors/refresh` for an immediate pass, and `DELETE /api/monitors?id=series:tt123` to stop monitoring. Requests accept `media_type`, `imdb_id`, `title`, `year`, optional provider IDs, and a `qualities` array.
+
 ## Configuration
 
 | Env | Default | Notes |
@@ -169,6 +175,9 @@ curl -X DELETE http://localhost:8080/api/pins -d '{"imdb_id":"tt38262097","seaso
 | `WISP_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, or `error` |
 | `WISP_READ_CHUNK_SIZE` | `32M` | Initial VFS read chunk (smaller = less debrid over-fetch on seeks) |
 | `WISP_READ_CHUNK_SIZE_LIMIT` | `512M` | Cap for the chunk ramp |
+| `WISP_MONITOR_INTERVAL` | `2h` | Monitor refresh interval; `0` disables automatic refresh |
+| `WISP_TMDB_API_KEY` | — | Optional TMDB v3 key or v4 token for home-release gating |
+| `WISP_TMDB_MARKETS` | `US,CA,GB,AU,DE,FR,IT,ES,JP,IN` | Digital or physical movie-release markets |
 
 ## Documentation
 

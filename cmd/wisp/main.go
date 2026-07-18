@@ -13,6 +13,7 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -49,6 +50,7 @@ func main() {
 		store: st, aio: aio, log: log, mountPath: cfg.MountPath,
 		webhook:   silowebhook.New(cfg.SiloWebhookURL, cfg.MountPath, log),
 		startedAt: time.Now(),
+		tmdbKey:   cfg.TMDBAPIKey, tmdbMarkets: cfg.TMDBMarkets,
 	}
 
 	srv := server.New(st, app.reResolve, log)
@@ -57,6 +59,10 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/add", app.handleAdd)
 	mux.HandleFunc("GET /api/pins", app.handleListPins)
+	mux.HandleFunc("POST /api/monitors", app.handleCreateMonitor)
+	mux.HandleFunc("GET /api/monitors", app.handleListMonitors)
+	mux.HandleFunc("DELETE /api/monitors", app.handleDeleteMonitor)
+	mux.HandleFunc("POST /api/monitors/refresh", app.handleRefreshMonitors)
 	mux.HandleFunc("DELETE /api/pins", app.handleDeletePin)
 	mux.HandleFunc("GET /api/status", app.handleStatus)
 	mux.HandleFunc("GET /metrics", app.handleMetrics)
@@ -74,6 +80,9 @@ func main() {
 			os.Exit(1)
 		}
 	}()
+	monitorCtx, stopMonitors := context.WithCancel(context.Background())
+	defer stopMonitors()
+	go app.runMonitorLoop(monitorCtx, cfg.MonitorInterval)
 
 	var mnt *mount.Mount
 	if cfg.SelfMount() {
@@ -99,6 +108,7 @@ func main() {
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 	<-stop
+	stopMonitors()
 	log.Info("shutting down")
 	if mnt != nil {
 		if err := mnt.Close(); err != nil {
@@ -132,17 +142,20 @@ func portOf(addr string) string {
 	return ":8080"
 }
 
-const version = "0.5.0"
+const version = "0.6.0"
 
 type app struct {
-	store     *store.Store
-	aio       *aiostreams.Client
-	log       *slog.Logger
-	srv       *server.Server
-	mnt       *mount.Mount
-	webhook   *silowebhook.Client
-	mountPath string
-	startedAt time.Time
+	store       *store.Store
+	aio         *aiostreams.Client
+	log         *slog.Logger
+	srv         *server.Server
+	mnt         *mount.Mount
+	webhook     *silowebhook.Client
+	mountPath   string
+	startedAt   time.Time
+	tmdbKey     string
+	tmdbMarkets []string
+	monitorMu   sync.Mutex
 }
 
 type addRequest struct {

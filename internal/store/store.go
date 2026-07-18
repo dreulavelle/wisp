@@ -46,7 +46,10 @@ func Open(path string) (*Store, error) {
 		return nil, err
 	}
 	if err := db.Update(func(tx *bbolt.Tx) error {
-		_, err := tx.CreateBucketIfNotExists(pinsBucket)
+		if _, err := tx.CreateBucketIfNotExists(pinsBucket); err != nil {
+			return err
+		}
+		_, err := tx.CreateBucketIfNotExists(monitorsBucket)
 		return err
 	}); err != nil {
 		db.Close()

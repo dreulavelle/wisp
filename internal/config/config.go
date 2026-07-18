@@ -6,6 +6,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Config holds everything Wisp needs to serve a resolver-backed library.
@@ -38,6 +39,9 @@ type Config struct {
 	ReadChunkSize int64
 	// ReadChunkSizeLimit caps the chunk ramp in bytes.
 	ReadChunkSizeLimit int64
+	MonitorInterval    time.Duration
+	TMDBAPIKey         string
+	TMDBMarkets        []string
 }
 
 // SelfMount reports whether wisp should mount the library itself.
@@ -56,6 +60,9 @@ func Load() (*Config, error) {
 		LogLevel:           strings.ToLower(envOr("WISP_LOG_LEVEL", "info")),
 		ReadChunkSize:      sizeEnv("WISP_READ_CHUNK_SIZE", 32<<20),
 		ReadChunkSizeLimit: sizeEnv("WISP_READ_CHUNK_SIZE_LIMIT", 512<<20),
+		MonitorInterval:    durationEnv("WISP_MONITOR_INTERVAL", 2*time.Hour),
+		TMDBAPIKey:         strings.TrimSpace(os.Getenv("WISP_TMDB_API_KEY")),
+		TMDBMarkets:        strings.FieldsFunc(envOr("WISP_TMDB_MARKETS", "US,CA,GB,AU,DE,FR,IT,ES,JP,IN"), func(r rune) bool { return r == 44 || r == 59 || r == 32 }),
 	}
 	if c.AIOStreamsURL == "" {
 		return nil, fmt.Errorf("WISP_AIOSTREAMS_URL is required")
@@ -65,6 +72,18 @@ func Load() (*Config, error) {
 
 // sizeEnv parses a byte size like "16M", "512M", "1G", or a plain byte count,
 // falling back to the default on an empty or unparseable value.
+func durationEnv(key string, fallback time.Duration) time.Duration {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return fallback
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d < 0 {
+		return fallback
+	}
+	return d
+}
+
 func sizeEnv(key string, fallback int64) int64 {
 	v := strings.TrimSpace(strings.ToUpper(os.Getenv(key)))
 	if v == "" {
