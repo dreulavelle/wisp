@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.7.1](https://github.com/dreulavelle/wisp/compare/v0.7.0...v0.7.1) (2026-07-18)
+
+
+### Bug Fixes
+
+* **seerr:** tolerate empty/number/null ids in webhook payload ([ef3815c](https://github.com/dreulavelle/wisp/commit/ef3815ceedfc8480fc17dc0c48c35d9e270ab6cc))
+
+
+### Documentation
+
+* be transparent that Seerr creds are optional-but-recommended ([0fdfd81](https://github.com/dreulavelle/wisp/commit/0fdfd81c039a3b627c5653fbe9bb5c53113f2c85))
+
 ## [0.7.0](https://github.com/dreulavelle/wisp/compare/v0.6.0...v0.7.0) (2026-07-18)
 
 
