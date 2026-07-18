@@ -23,6 +23,25 @@ func EpisodePath(title string, year, season, episode int, quality, ext string) s
 	return path.Join("shows", folder, seasonDir, file)
 }
 
+// DetectQuality reads a resolution label from a release filename or title,
+// returning "" when none is recognizable. This lets the label reflect the
+// stream AIOStreams actually selected rather than a caller's guess.
+func DetectQuality(s string) string {
+	s = strings.ToLower(s)
+	switch {
+	case strings.Contains(s, "2160p"), strings.Contains(s, "4k"), strings.Contains(s, "uhd"):
+		return "2160p"
+	case strings.Contains(s, "1080p"):
+		return "1080p"
+	case strings.Contains(s, "720p"):
+		return "720p"
+	case strings.Contains(s, "480p"):
+		return "480p"
+	default:
+		return ""
+	}
+}
+
 // Ext picks a media extension from a release filename, defaulting to .mkv.
 func Ext(filename string) string {
 	filename = strings.ToLower(strings.TrimSpace(filename))

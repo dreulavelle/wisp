@@ -104,3 +104,39 @@ func TestChildrenSynthesizesTree(t *testing.T) {
 		t.Fatalf("season: dirs=%v files=%v", dirs, files)
 	}
 }
+
+func TestListCountDelete(t *testing.T) {
+	st := open(t)
+	ctx := context.Background()
+	mk := func(vp, imdb string, s, e int) Pin {
+		return Pin{MediaType: "series", IMDbID: imdb, Season: s, Episode: e, VirtualPath: vp,
+			SourceURL: "http://x", Size: 1, ResolvedAt: time.Now()}
+	}
+	st.Upsert(ctx, mk("shows/A/S01/e1.mkv", "tt1", 1, 1))
+	st.Upsert(ctx, mk("shows/A/S01/e2.mkv", "tt1", 1, 2))
+	st.Upsert(ctx, mk("movies/B/b.mkv", "tt2", 0, 0))
+
+	if n, _ := st.Count(ctx); n != 3 {
+		t.Fatalf("count = %d", n)
+	}
+	pins, _ := st.List(ctx)
+	if len(pins) != 3 {
+		t.Fatalf("list = %d", len(pins))
+	}
+
+	existed, _ := st.Delete(ctx, "movies/B/b.mkv")
+	if !existed {
+		t.Fatal("delete reported not-existed")
+	}
+	if n, _ := st.Count(ctx); n != 2 {
+		t.Fatalf("count after delete = %d", n)
+	}
+
+	deleted, _ := st.DeleteByMedia(ctx, "tt1", 1, 1)
+	if len(deleted) != 1 || deleted[0] != "shows/A/S01/e1.mkv" {
+		t.Fatalf("delete by media = %v", deleted)
+	}
+	if n, _ := st.Count(ctx); n != 1 {
+		t.Fatalf("count after media delete = %d", n)
+	}
+}

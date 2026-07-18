@@ -48,3 +48,18 @@ func TestSanitizeStripsPathBreakers(t *testing.T) {
 		t.Fatalf("sanitize = %q, want %q", got, want)
 	}
 }
+
+func TestDetectQuality(t *testing.T) {
+	cases := map[string]string{
+		"Show.S01E04.2160p.WEB.mkv":      "2160p",
+		"movie.4K.UHD.BluRay.mkv":        "2160p",
+		"Show.S01E04.1080p.WEB.h264.mkv": "1080p",
+		"old.720p.rip.mp4":               "720p",
+		"unknown.release.mkv":            "",
+	}
+	for in, want := range cases {
+		if got := DetectQuality(in); got != want {
+			t.Fatalf("DetectQuality(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

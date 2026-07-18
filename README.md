@@ -68,7 +68,20 @@ curl -X POST http://localhost:8080/api/add -d '{
 }'
 ```
 
-Add a movie: `"media_type": "movie"`, omit `season`/`episode`.
+Add a movie: `"media_type": "movie"`, omit `season`/`episode`. `quality` is
+optional — wisp labels the file with the resolution AIOStreams actually
+returned.
+
+List pins: `GET /api/pins`. Status: `GET /api/status`.
+
+Remove a title:
+
+```sh
+# by virtual path
+curl -X DELETE "http://localhost:8080/api/pins?path=shows/…/ep.mkv"
+# or by identity
+curl -X DELETE http://localhost:8080/api/pins -d '{"imdb_id":"tt38262097","season":1,"episode":4}'
+```
 
 ## Configuration
 

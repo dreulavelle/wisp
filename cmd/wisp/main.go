@@ -37,12 +37,15 @@ func main() {
 	defer st.Close()
 
 	aio := aiostreams.New(cfg.AIOStreamsURL, cfg.AIOStreamsPassword)
-	app := &app{store: st, aio: aio, log: log}
+	app := &app{store: st, aio: aio, log: log, mountPath: cfg.MountPath, startedAt: time.Now()}
 
 	srv := server.New(st, app.reResolve, log)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/add", app.handleAdd)
+	mux.HandleFunc("GET /api/pins", app.handleListPins)
+	mux.HandleFunc("DELETE /api/pins", app.handleDeletePin)
+	mux.HandleFunc("GET /api/status", app.handleStatus)
 	mux.HandleFunc("GET /api/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprint(w, "ok")
@@ -72,6 +75,7 @@ func main() {
 			os.Exit(1)
 		}
 		mnt = m
+		app.mounted = true
 	} else {
 		log.Info("serving HTTP only; mount it with rclone (set WISP_MOUNT_PATH to self-mount)")
 	}
@@ -113,10 +117,15 @@ func portOf(addr string) string {
 	return ":8080"
 }
 
+const version = "0.2.0"
+
 type app struct {
-	store *store.Store
-	aio   *aiostreams.Client
-	log   *slog.Logger
+	store     *store.Store
+	aio       *aiostreams.Client
+	log       *slog.Logger
+	mounted   bool
+	mountPath string
+	startedAt time.Time
 }
 
 type addRequest struct {
@@ -143,25 +152,31 @@ func (a *app) handleAdd(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "imdb_id and title are required", http.StatusBadRequest)
 		return
 	}
-	if req.Quality == "" {
-		req.Quality = "1080p"
-	}
 
 	sourceURL, size, filename, err := a.resolve(r.Context(), req.MediaType, req.IMDbID, req.Season, req.Episode)
 	if err != nil {
 		http.Error(w, "no playable stream: "+err.Error(), http.StatusBadGateway)
 		return
 	}
+	// Label with the resolution AIOStreams actually selected; fall back to the
+	// caller's hint, then 1080p. (Silo reads real metadata regardless.)
+	quality := library.DetectQuality(filename)
+	if quality == "" {
+		quality = req.Quality
+	}
+	if quality == "" {
+		quality = "1080p"
+	}
 	ext := library.Ext(filename)
 	var vpath string
 	if req.MediaType == "movie" {
-		vpath = library.MoviePath(req.Title, req.Year, req.Quality, ext)
+		vpath = library.MoviePath(req.Title, req.Year, quality, ext)
 	} else {
-		vpath = library.EpisodePath(req.Title, req.Year, req.Season, req.Episode, req.Quality, ext)
+		vpath = library.EpisodePath(req.Title, req.Year, req.Season, req.Episode, quality, ext)
 	}
 	pin := store.Pin{
 		MediaType: req.MediaType, IMDbID: req.IMDbID, Season: req.Season, Episode: req.Episode,
-		Title: req.Title, Year: req.Year, Quality: req.Quality, VirtualPath: vpath,
+		Title: req.Title, Year: req.Year, Quality: quality, VirtualPath: vpath,
 		SourceURL: sourceURL, Size: size, ResolvedAt: time.Now(),
 	}
 	if err := a.store.Upsert(r.Context(), pin); err != nil {
@@ -171,6 +186,72 @@ func (a *app) handleAdd(w http.ResponseWriter, r *http.Request) {
 	a.log.Info("pinned", "path", vpath, "size", size)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{"virtual_path": vpath, "size": size})
+}
+
+func (a *app) handleListPins(w http.ResponseWriter, r *http.Request) {
+	pins, err := a.store.List(r.Context())
+	if err != nil {
+		http.Error(w, "list failed", http.StatusInternalServerError)
+		return
+	}
+	out := make([]map[string]any, 0, len(pins))
+	for _, p := range pins {
+		out = append(out, map[string]any{
+			"virtual_path": p.VirtualPath, "media_type": p.MediaType, "imdb_id": p.IMDbID,
+			"season": p.Season, "episode": p.Episode, "title": p.Title, "year": p.Year,
+			"quality": p.Quality, "size": p.Size, "resolved_at": p.ResolvedAt.Unix(),
+		})
+	}
+	writeJSON(w, out)
+}
+
+func (a *app) handleDeletePin(w http.ResponseWriter, r *http.Request) {
+	if path := strings.TrimSpace(r.URL.Query().Get("path")); path != "" {
+		existed, err := a.store.Delete(r.Context(), path)
+		if err != nil {
+			http.Error(w, "delete failed", http.StatusInternalServerError)
+			return
+		}
+		if !existed {
+			http.NotFound(w, r)
+			return
+		}
+		a.log.Info("deleted", "path", path)
+		writeJSON(w, map[string]any{"deleted": []string{path}})
+		return
+	}
+	var req struct {
+		IMDbID  string `json:"imdb_id"`
+		Season  int    `json:"season"`
+		Episode int    `json:"episode"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.IMDbID == "" {
+		http.Error(w, "provide ?path= or a JSON body with imdb_id", http.StatusBadRequest)
+		return
+	}
+	deleted, err := a.store.DeleteByMedia(r.Context(), req.IMDbID, req.Season, req.Episode)
+	if err != nil {
+		http.Error(w, "delete failed", http.StatusInternalServerError)
+		return
+	}
+	a.log.Info("deleted", "imdb", req.IMDbID, "count", len(deleted))
+	writeJSON(w, map[string]any{"deleted": deleted})
+}
+
+func (a *app) handleStatus(w http.ResponseWriter, r *http.Request) {
+	count, _ := a.store.Count(r.Context())
+	writeJSON(w, map[string]any{
+		"version":        version,
+		"uptime_seconds": int(time.Since(a.startedAt).Seconds()),
+		"pins":           count,
+		"mounted":        a.mounted,
+		"mount_path":     a.mountPath,
+	})
+}
+
+func writeJSON(w http.ResponseWriter, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(v)
 }
 
 // reResolve refreshes a pin whose upstream failed by re-searching AIOStreams.

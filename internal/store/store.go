@@ -123,6 +123,77 @@ func (s *Store) UpdateResolution(_ context.Context, virtualPath, sourceURL strin
 	})
 }
 
+// List returns every pin, ordered by virtual path.
+func (s *Store) List(_ context.Context) ([]Pin, error) {
+	var pins []Pin
+	err := s.db.View(func(tx *bbolt.Tx) error {
+		return tx.Bucket(pinsBucket).ForEach(func(_, v []byte) error {
+			var p Pin
+			if err := json.Unmarshal(v, &p); err != nil {
+				return err
+			}
+			pins = append(pins, p)
+			return nil
+		})
+	})
+	return pins, err
+}
+
+// Count returns the number of pins.
+func (s *Store) Count(_ context.Context) (int, error) {
+	n := 0
+	err := s.db.View(func(tx *bbolt.Tx) error {
+		n = tx.Bucket(pinsBucket).Stats().KeyN
+		return nil
+	})
+	return n, err
+}
+
+// Delete removes the pin at a virtual path, reporting whether it existed.
+func (s *Store) Delete(_ context.Context, virtualPath string) (bool, error) {
+	existed := false
+	err := s.db.Update(func(tx *bbolt.Tx) error {
+		b := tx.Bucket(pinsBucket)
+		if b.Get([]byte(virtualPath)) != nil {
+			existed = true
+		}
+		return b.Delete([]byte(virtualPath))
+	})
+	return existed, err
+}
+
+// DeleteByMedia removes every pin matching an IMDb id (and, for series, a
+// season/episode), returning the deleted virtual paths. Use season<=0 to match
+// a movie.
+func (s *Store) DeleteByMedia(_ context.Context, imdbID string, season, episode int) ([]string, error) {
+	var deleted []string
+	err := s.db.Update(func(tx *bbolt.Tx) error {
+		b := tx.Bucket(pinsBucket)
+		var keys [][]byte
+		err := b.ForEach(func(k, v []byte) error {
+			var p Pin
+			if err := json.Unmarshal(v, &p); err != nil {
+				return err
+			}
+			if p.IMDbID == imdbID && (season <= 0 || (p.Season == season && p.Episode == episode)) {
+				keys = append(keys, append([]byte(nil), k...))
+				deleted = append(deleted, p.VirtualPath)
+			}
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+		for _, k := range keys {
+			if err := b.Delete(k); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	return deleted, err
+}
+
 // Children returns the immediate directory and file names under a virtual
 // directory prefix (empty prefix = library root). dirs end without a slash.
 //
