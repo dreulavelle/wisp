@@ -20,7 +20,7 @@ type mountEntry struct {
 // would be lost on container recreation. It is best-effort: any parse or IO
 // failure is swallowed silently so it can never affect startup.
 func warnDBPersistence(dbPath string, log *slog.Logger) {
-	dir, ok := dbDir(dbPath)
+	abs, ok := absDBPath(dbPath)
 	if !ok {
 		return
 	}
@@ -33,18 +33,22 @@ func warnDBPersistence(dbPath string, log *slog.Logger) {
 	if err != nil || len(mounts) == 0 {
 		return
 	}
-	m, ok := longestMount(mounts, dir)
+	// Match against the DB *file* path, not its directory: when the file itself
+	// is bind-mounted (e.g. `-v /host/wisp.db:/data/wisp.db`), the most-specific
+	// covering mount is that file's own mount — matching the dir would miss it
+	// and wrongly resolve to the overlay root.
+	m, ok := longestMount(mounts, abs)
 	if !ok {
 		return // couldn't find a covering mount — don't guess
 	}
 	if isEphemeralMount(m) {
-		log.Warn("pin database at "+dbPath+" is not on a mounted volume — pins will NOT survive container recreation; mount a volume at "+dir,
-			"db_path", dbPath, "mount", m.mountPoint, "fstype", m.fsType)
+		log.Warn("pin database at "+abs+" is not on a mounted volume — pins will NOT survive container recreation; mount a volume at "+filepath.Dir(abs),
+			"db_path", abs, "mount", m.mountPoint, "fstype", m.fsType)
 	}
 }
 
-// dbDir returns the absolute directory containing dbPath.
-func dbDir(dbPath string) (string, bool) {
+// absDBPath returns the absolute path of the pin database file.
+func absDBPath(dbPath string) (string, bool) {
 	dbPath = strings.TrimSpace(dbPath)
 	if dbPath == "" {
 		return "", false
@@ -53,7 +57,7 @@ func dbDir(dbPath string) (string, bool) {
 	if err != nil {
 		return "", false
 	}
-	return filepath.Dir(abs), true
+	return abs, true
 }
 
 // parseMountinfo parses /proc/self/mountinfo. Each line is:

@@ -92,6 +92,35 @@ func TestLongestMountAndEphemeral(t *testing.T) {
 	}
 }
 
+// A file-level bind mount (-v /host/wisp.db:/data/wisp.db) on top of an overlay
+// root must resolve to the file's own mount, not the overlay — no false warning.
+func TestLongestMountFileBindMount(t *testing.T) {
+	fixture := `30 28 0:24 / / rw,relatime - overlay overlay rw,lowerdir=/x
+101 30 0:44 / /tmp rw,relatime - tmpfs tmpfs rw
+200 30 259:1 /host/wisp.db /data/wisp.db rw,relatime - ext4 /dev/nvme0n1p1 rw`
+	mounts, err := parseMountinfo(strings.NewReader(fixture))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The DB file path resolves to its own bind mount (ext4) — persistent.
+	m, ok := longestMount(mounts, "/data/wisp.db")
+	if !ok {
+		t.Fatal("no covering mount for /data/wisp.db")
+	}
+	if m.mountPoint != "/data/wisp.db" || m.fsType != "ext4" {
+		t.Fatalf("file bind mount = %#v, want /data/wisp.db ext4", m)
+	}
+	if isEphemeralMount(m) {
+		t.Fatal("file bind mount wrongly flagged ephemeral")
+	}
+	// Guard the regression: matching the parent dir instead would fall through to
+	// the overlay root and wrongly warn.
+	dirMount, _ := longestMount(mounts, "/data")
+	if !isEphemeralMount(dirMount) {
+		t.Fatalf("expected /data to resolve to overlay root, got %#v", dirMount)
+	}
+}
+
 func TestLongestMountNoRoot(t *testing.T) {
 	// Without a root mount, an unrelated dir has no covering mount.
 	mounts := []mountEntry{{mountPoint: "/data", fsType: "ext4"}}
