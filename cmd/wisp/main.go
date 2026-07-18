@@ -20,7 +20,9 @@ import (
 	"github.com/dreulavelle/wisp/internal/config"
 	"github.com/dreulavelle/wisp/internal/library"
 	"github.com/dreulavelle/wisp/internal/metadata"
+	"github.com/dreulavelle/wisp/internal/monitor"
 	"github.com/dreulavelle/wisp/internal/mount"
+	"github.com/dreulavelle/wisp/internal/seerr"
 	"github.com/dreulavelle/wisp/internal/server"
 	"github.com/dreulavelle/wisp/internal/silowebhook"
 	"github.com/dreulavelle/wisp/internal/store"
@@ -48,16 +50,30 @@ func main() {
 	app := &app{
 		store: st, aio: aio, log: log, mountPath: cfg.MountPath,
 		webhook:   silowebhook.New(cfg.SiloWebhookURL, cfg.MountPath, log),
+		meta:      metadata.New(cfg.TMDBAPIKey, cfg.TMDBMarkets),
+		seerr:     seerr.New(cfg.SeerrURL, cfg.SeerrAPIKey),
 		startedAt: time.Now(),
 	}
+	app.mon = monitor.New(st, app.meta, app, cfg.ScheduleInterval, log)
 
 	srv := server.New(st, app.reResolve, log)
 	app.srv = srv
+
+	// The monitor scheduler runs for the process lifetime, pinning released
+	// movies and newly-aired episodes; it wakes near the next airstamp.
+	monCtx, monCancel := context.WithCancel(context.Background())
+	defer monCancel()
+	go app.mon.Run(monCtx)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/add", app.handleAdd)
 	mux.HandleFunc("GET /api/pins", app.handleListPins)
 	mux.HandleFunc("DELETE /api/pins", app.handleDeletePin)
+	mux.HandleFunc("POST /api/seerr", app.handleSeerrWebhook)
+	mux.HandleFunc("POST /api/monitors", app.handleCreateMonitor)
+	mux.HandleFunc("GET /api/monitors", app.handleListMonitors)
+	mux.HandleFunc("DELETE /api/monitors", app.handleDeleteMonitor)
+	mux.HandleFunc("POST /api/monitors/refresh", app.handleRefreshMonitors)
 	mux.HandleFunc("GET /api/status", app.handleStatus)
 	mux.HandleFunc("GET /metrics", app.handleMetrics)
 	mux.HandleFunc("GET /api/healthz", func(w http.ResponseWriter, _ *http.Request) {
@@ -132,7 +148,7 @@ func portOf(addr string) string {
 	return ":8080"
 }
 
-const version = "0.5.0"
+const version = "0.6.0"
 
 type app struct {
 	store     *store.Store
@@ -141,6 +157,9 @@ type app struct {
 	srv       *server.Server
 	mnt       *mount.Mount
 	webhook   *silowebhook.Client
+	meta      *metadata.Service
+	mon       *monitor.Monitor
+	seerr     *seerr.Client
 	mountPath string
 	startedAt time.Time
 }
@@ -171,63 +190,91 @@ func (a *app) handleAdd(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "imdb_id and title are required", http.StatusBadRequest)
 		return
 	}
-
-	wantQuality := library.NormalizeQuality(req.Quality)
-	sourceURL, size, filename, resolution, err := a.resolve(r.Context(), req.MediaType, req.IMDbID, req.Season, req.Episode, wantQuality)
+	vpath, size, err := a.pin(r.Context(), pinSpec{
+		MediaType: req.MediaType, IMDbID: req.IMDbID, TMDbID: req.TMDbID, TVDbID: req.TVDbID,
+		Title: req.Title, Year: req.Year, Season: req.Season, Episode: req.Episode, Quality: req.Quality,
+	})
 	if err != nil {
 		writeAddError(w, a.log, req, err)
 		return
 	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{"virtual_path": vpath, "size": size})
+}
+
+// pinSpec is one resolve+pin request, shared by the API and the monitor.
+type pinSpec struct {
+	MediaType string
+	IMDbID    string
+	TMDbID    string
+	TVDbID    string
+	Title     string
+	Year      int
+	Season    int
+	Episode   int
+	Quality   string
+}
+
+// pin resolves a stream via AIOStreams and records the pin, superseding a
+// same-quality pin at a different path and notifying the media server. A movie
+// or series without an IMDb id is searched (and tagged) by its tmdb id. The
+// returned error is a classified resolve error (errNo… or *aiostreams.SearchError).
+func (a *app) pin(ctx context.Context, s pinSpec) (vpath string, size int64, err error) {
+	searchID := s.IMDbID
+	if searchID == "" && s.TMDbID != "" {
+		searchID = "tmdb:" + s.TMDbID
+	}
+	wantQuality := library.NormalizeQuality(s.Quality)
+	sourceURL, size, filename, resolution, err := a.resolve(ctx, s.MediaType, searchID, s.Season, s.Episode, wantQuality)
+	if err != nil {
+		return "", 0, err
+	}
 	quality := qualityLabel(resolution, filename, wantQuality)
-	ids := library.IDs{IMDb: req.IMDbID, TMDb: req.TMDbID, TVDb: req.TVDbID}
-	// If a feeder gave only an IMDb id, enrich TVDB/TMDB ids from Cinemeta so the
-	// folder tag lets the media server match deterministically (Silo/Plex/
-	// Jellyfin resolve by tvdb/tmdb, not imdb).
-	if ids.TVDb == "" && ids.TMDb == "" && strings.HasPrefix(req.IMDbID, "tt") {
-		tvdb, tmdb := metadata.ProviderIDs(r.Context(), req.MediaType, req.IMDbID)
+	ids := library.IDs{IMDb: searchID, TMDb: s.TMDbID, TVDb: s.TVDbID}
+	// If only an IMDb id is known, enrich tvdb/tmdb from Cinemeta so the folder
+	// tag lets the media server match deterministically (they resolve by
+	// tvdb/tmdb, not imdb).
+	if ids.TVDb == "" && ids.TMDb == "" && strings.HasPrefix(searchID, "tt") {
+		tvdb, tmdb := metadata.ProviderIDs(ctx, s.MediaType, searchID)
 		ids.TVDb, ids.TMDb = tvdb, tmdb
 	}
 	ext := library.Ext(filename)
-	var vpath string
-	if req.MediaType == "movie" {
-		vpath = library.MoviePath(req.Title, req.Year, ids, quality, ext)
+	if s.MediaType == "movie" {
+		vpath = library.MoviePath(s.Title, s.Year, ids, quality, ext)
 	} else {
-		vpath = library.EpisodePath(req.Title, req.Year, req.Season, req.Episode, ids, quality, ext)
+		vpath = library.EpisodePath(s.Title, s.Year, s.Season, s.Episode, ids, quality, ext)
 	}
 	// A supersede/rename is the *same quality tier* landing at a new path (e.g. a
 	// re-resolve changed the extension). Pins that differ only by quality are
-	// distinct targets and must coexist, so quality is part of the identity here —
-	// otherwise adding 2160p would delete the 1080p pin.
-	existing, _ := a.store.List(r.Context())
+	// distinct targets and must coexist, so quality is part of the identity here.
+	existing, _ := a.store.List(ctx)
 	var renamed []store.Pin
 	for _, old := range existing {
-		if old.IMDbID == req.IMDbID && old.Season == req.Season && old.Episode == req.Episode &&
+		if old.IMDbID == searchID && old.Season == s.Season && old.Episode == s.Episode &&
 			strings.EqualFold(old.Quality, quality) && old.VirtualPath != vpath {
 			renamed = append(renamed, old)
 		}
 	}
 	pin := store.Pin{
-		MediaType: req.MediaType, IMDbID: req.IMDbID, Season: req.Season, Episode: req.Episode,
-		Title: req.Title, Year: req.Year, Quality: quality, VirtualPath: vpath,
+		MediaType: s.MediaType, IMDbID: searchID, Season: s.Season, Episode: s.Episode,
+		Title: s.Title, Year: s.Year, Quality: quality, VirtualPath: vpath,
 		SourceURL: sourceURL, Size: size, ResolvedAt: time.Now(),
 	}
-	if err := a.store.Upsert(r.Context(), pin); err != nil {
-		http.Error(w, "store failed", http.StatusInternalServerError)
-		return
+	if err := a.store.Upsert(ctx, pin); err != nil {
+		return "", 0, err
 	}
 	a.log.Info("pinned", "path", vpath, "size", size)
 	for _, old := range renamed {
-		if deleted, err := a.store.Delete(r.Context(), old.VirtualPath); err != nil {
-			a.log.Warn("remove renamed pin", "path", old.VirtualPath, "error", err)
+		if deleted, e := a.store.Delete(ctx, old.VirtualPath); e != nil {
+			a.log.Warn("remove renamed pin", "path", old.VirtualPath, "error", e)
 		} else if deleted {
-			a.webhook.Rename(r.Context(), req.MediaType, old.VirtualPath, vpath)
+			a.webhook.Rename(ctx, s.MediaType, old.VirtualPath, vpath)
 		}
 	}
 	if len(renamed) == 0 {
-		a.webhook.Import(r.Context(), req.MediaType, vpath)
+		a.webhook.Import(ctx, s.MediaType, vpath)
 	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{"virtual_path": vpath, "size": size})
+	return vpath, size, nil
 }
 
 func (a *app) handleListPins(w http.ResponseWriter, r *http.Request) {
@@ -324,10 +371,12 @@ func (a *app) deleteMountedPin(ctx context.Context, path string) error {
 
 func (a *app) handleStatus(w http.ResponseWriter, r *http.Request) {
 	count, _ := a.store.Count(r.Context())
+	monitors, _ := a.store.CountMonitored(r.Context())
 	writeJSON(w, map[string]any{
 		"version":        version,
 		"uptime_seconds": int(time.Since(a.startedAt).Seconds()),
 		"pins":           count,
+		"monitors":       monitors,
 		"mounted":        a.mnt.Healthy(),
 		"mount_path":     a.mountPath,
 	})
@@ -344,7 +393,9 @@ func (a *app) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	metric := func(name, help, typ string, val int64) {
 		fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s %s\n%s %d\n", name, help, name, typ, name, val)
 	}
+	monitors, _ := a.store.CountMonitored(r.Context())
 	metric("wisp_pins", "Pinned media files.", "gauge", int64(pins))
+	metric("wisp_monitors", "Titles on the monitor watchlist.", "gauge", int64(monitors))
 	metric("wisp_mounted", "FUSE mount live (1) or not (0).", "gauge", int64(mounted))
 	metric("wisp_uptime_seconds", "Process uptime.", "gauge", int64(time.Since(a.startedAt).Seconds()))
 	metric("wisp_file_requests_total", "Byte-range file requests served.", "counter", m.FileRequests)
