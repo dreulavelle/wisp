@@ -172,3 +172,64 @@ func TestMonitorRecoversFromStore(t *testing.T) {
 		t.Fatalf("recovered item not processed; pinned=%d", len(ful.pinned))
 	}
 }
+
+// A just-aired episode whose stream hasn't appeared must be retried at the
+// interval, not deferred to the next (possibly distant) airstamp.
+func TestMonitorRetriesUnavailableAiredEpisode(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/meta/series/tt7.json", func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte(`{"meta":{"videos":[
+			{"season":1,"episode":1,"released":"2026-01-01T00:00:00Z"},
+			{"season":1,"episode":2,"released":"2027-06-01T00:00:00Z"}
+		]}}`))
+	})
+	mux.HandleFunc("/lookup/shows", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte(`{"id":0}`)) })
+	ful := newFakeFul()
+	ful.noStream[[2]int{1, 1}] = true // E1 aired but no stream yet
+	now := date("2026-02-01T00:00:00Z")
+	m, st := testMonitor(t, mux, ful, now) // interval = 1h
+
+	m.Intake(context.Background(), Request{MediaType: "series", IMDbID: "tt7", Title: "Show", Qualities: []string{"1080p"}})
+	m.checkDue(context.Background())
+
+	item, _ := st.GetMonitored(context.Background(), "series:tt7")
+	if want := now.Add(time.Hour); !item.DueAt.Equal(want) {
+		t.Fatalf("DueAt = %v, want interval retry %v (not the far E2 airstamp)", item.DueAt, want)
+	}
+}
+
+// persistResult must not clobber a concurrent Intake's changes with a stale
+// scheduler snapshot.
+func TestPersistResultRespectsConcurrentIntake(t *testing.T) {
+	ctx := context.Background()
+	m, st := testMonitor(t, http.NewServeMux(), newFakeFul(), date("2026-02-01T00:00:00Z"))
+	now := m.now()
+	st.PutMonitored(ctx, store.Monitored{Key: "series:tt7", MediaType: "series", IMDbID: "tt7", Enabled: true, Qualities: []string{"1080p"}, DueAt: now})
+	snapshot, _ := st.GetMonitored(ctx, "series:tt7")
+
+	// Concurrent Intake: adds a 4K tier and demands reprocessing (DueAt=now).
+	st.PutMonitored(ctx, store.Monitored{Key: "series:tt7", MediaType: "series", IMDbID: "tt7", Enabled: true, Qualities: []string{"1080p", "2160p"}, DueAt: now})
+
+	// Scheduler finishes its pass on the STALE snapshot, computing a far DueAt.
+	m.persistResult(ctx, *snapshot, now.Add(100*time.Hour), false, "")
+
+	cur, _ := st.GetMonitored(ctx, "series:tt7")
+	if len(cur.Qualities) != 2 {
+		t.Fatalf("concurrent Intake's qualities clobbered: %v", cur.Qualities)
+	}
+	if cur.DueAt.Equal(now.Add(100 * time.Hour)) {
+		t.Fatal("scheduler clobbered the re-request's DueAt with its stale far-future value")
+	}
+}
+
+func TestMonitorRejectsUngatableMovie(t *testing.T) {
+	st := newStore(t)
+	m := New(st, metadata.New("", nil), newFakeFul(), time.Hour, slog.New(slog.DiscardHandler)) // no TMDB key
+	// tmdb-only movie, no imdb, no TMDB key → no way to gate release.
+	if err := m.Intake(context.Background(), Request{MediaType: "movie", TMDbID: "603", Title: "X"}); err == nil {
+		t.Fatal("expected rejection of ungatable tmdb-only movie")
+	}
+	if n, _ := st.CountMonitored(context.Background()); n != 0 {
+		t.Fatalf("ungatable movie was stored: %d", n)
+	}
+}

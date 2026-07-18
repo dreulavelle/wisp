@@ -62,7 +62,11 @@ func (a *app) handleSeerrWebhook(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK) // test ping / non-approval event
 		return
 	}
-	a.seerr.Enrich(r.Context(), in)
+	if err := a.seerr.Enrich(r.Context(), in); err != nil {
+		// Proceed on webhook data, but say so loudly: 4K intent and seasons are
+		// then guesses (standard / all seasons). A re-request corrects them.
+		a.log.Warn("seerr enrichment failed; using webhook data (4K/seasons may be inexact)", "title", in.Title, "error", err)
+	}
 	if err := a.mon.Intake(r.Context(), monitor.Request{
 		MediaType: in.MediaType, IMDbID: in.IMDbID, TMDbID: in.TMDbID, TVDbID: in.TVDbID,
 		Title: in.Title, Year: in.Year, Qualities: in.Qualities(), Seasons: in.Seasons,
@@ -90,7 +94,7 @@ type monitorRequest struct {
 // Seerr required) — POST /api/monitors.
 func (a *app) handleCreateMonitor(w http.ResponseWriter, r *http.Request) {
 	var req monitorRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
 		http.Error(w, "invalid body", http.StatusBadRequest)
 		return
 	}
@@ -109,8 +113,9 @@ func (a *app) handleCreateMonitor(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
-	writeJSON(w, map[string]any{"monitoring": true})
+	_ = json.NewEncoder(w).Encode(map[string]any{"monitoring": true})
 }
 
 // handleListMonitors returns the watchlist — GET /api/monitors.

@@ -32,35 +32,38 @@ func New(baseURL, apiKey string) *Client {
 // Configured reports whether the client can reach Seerr.
 func (c *Client) Configured() bool { return c.baseURL != "" && c.apiKey != "" }
 
-// Enrich fills gaps in an intake from the Seerr API — best effort. Webhook data
-// is authoritative where present; the API only supplies what's missing (seasons,
-// 4K flag, ids, and title/year for folder naming).
-func (c *Client) Enrich(ctx context.Context, in *Intake) {
-	if in == nil || !c.Configured() {
-		return
+// Enrich fills gaps in an intake from the Seerr API — the authoritative source
+// for 4K intent and requested seasons (the webhook underspecifies both). It
+// returns an error when the request lookup fails so the caller can surface that
+// the request is proceeding on guessed data (standard/all-seasons). Filling
+// title/year is non-critical (the webhook subject is a fallback) and never errors
+// the call. A no-op (nil) when the client isn't configured or there's no id.
+func (c *Client) Enrich(ctx context.Context, in *Intake) error {
+	if in == nil || !c.Configured() || in.RequestID <= 0 {
+		return nil
 	}
-	if in.RequestID > 0 {
-		if r, err := c.request(ctx, in.RequestID); err == nil {
-			in.Is4K = r.Is4K // API is authoritative for 4K intent
-			if in.TMDbID == "" {
-				in.TMDbID = numToStr(r.Media.TMDbID)
-			}
-			if in.TVDbID == "" {
-				in.TVDbID = numToStr(r.Media.TVDbID)
-			}
-			if in.IMDbID == "" {
-				in.IMDbID = strings.TrimSpace(r.Media.IMDbID)
-			}
-			if len(in.Seasons) == 0 {
-				for _, s := range r.Seasons {
-					if s.SeasonNumber > 0 {
-						in.Seasons = append(in.Seasons, s.SeasonNumber)
-					}
-				}
+	r, err := c.request(ctx, in.RequestID)
+	if err != nil {
+		return err
+	}
+	in.Is4K = r.Is4K // API is authoritative for 4K intent
+	if in.TMDbID == "" {
+		in.TMDbID = numToStr(r.Media.TMDbID)
+	}
+	if in.TVDbID == "" {
+		in.TVDbID = numToStr(r.Media.TVDbID)
+	}
+	if in.IMDbID == "" {
+		in.IMDbID = strings.TrimSpace(r.Media.IMDbID)
+	}
+	if len(in.Seasons) == 0 {
+		for _, s := range r.Seasons {
+			if s.SeasonNumber > 0 {
+				in.Seasons = append(in.Seasons, s.SeasonNumber)
 			}
 		}
 	}
-	if (in.Title == "" || in.Year == 0) && in.TMDbID != "" {
+	if in.Title == "" || in.Year == 0 {
 		if title, year, err := c.mediaDetails(ctx, in.MediaType, in.TMDbID); err == nil {
 			if in.Title == "" {
 				in.Title = title
@@ -70,6 +73,7 @@ func (c *Client) Enrich(ctx context.Context, in *Intake) {
 			}
 		}
 	}
+	return nil
 }
 
 type seerrRequest struct {
@@ -120,22 +124,49 @@ func (c *Client) mediaDetails(ctx context.Context, mediaType, tmdbID string) (ti
 	return title, year, nil
 }
 
+// getJSON fetches with a small retry for transient failures (transport errors
+// and 5xx), so a momentary Seerr blip doesn't drop a request onto guessed data.
 func (c *Client) getJSON(ctx context.Context, endpoint string, out any) error {
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(300 * time.Millisecond):
+			}
+		}
+		retryable, err := c.getJSONOnce(ctx, endpoint, out)
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		if !retryable {
+			return err
+		}
+	}
+	return lastErr
+}
+
+func (c *Client) getJSONOnce(ctx context.Context, endpoint string, out any) (retryable bool, err error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
-		return err
+		return false, err
 	}
 	req.Header.Set("X-Api-Key", c.apiKey)
 	req.Header.Set("User-Agent", "wisp")
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return err
+		return true, err // transport blip — retry
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("seerr GET returned HTTP %d", resp.StatusCode)
+	if resp.StatusCode >= 500 {
+		return true, fmt.Errorf("seerr GET returned HTTP %d", resp.StatusCode)
 	}
-	return json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(out)
+	if resp.StatusCode != http.StatusOK {
+		return false, fmt.Errorf("seerr GET returned HTTP %d", resp.StatusCode)
+	}
+	return false, json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(out)
 }
 
 func numToStr(n json.Number) string {

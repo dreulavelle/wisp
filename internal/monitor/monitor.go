@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/dreulavelle/wisp/internal/library"
@@ -73,6 +74,10 @@ type Monitor struct {
 	interval time.Duration
 	now      func() time.Time
 	wake     chan struct{}
+	// mu serializes read-modify-write of a monitored item so the scheduler and a
+	// concurrent Intake/delete can't clobber each other (network processing runs
+	// outside the lock).
+	mu sync.Mutex
 }
 
 // New builds a monitor. interval is the fallback re-check ceiling.
@@ -101,16 +106,22 @@ func (m *Monitor) Intake(ctx context.Context, r Request) error {
 	if r.IMDbID == "" && r.TMDbID == "" {
 		return fmt.Errorf("intake requires an imdb or tmdb id")
 	}
+	// A movie is only gatable if a release date can be sourced: via Cinemeta
+	// (needs imdb) or TMDB (needs tmdb + a key). Otherwise it would retry forever.
+	if r.MediaType == "movie" && r.IMDbID == "" && (r.TMDbID == "" || !m.meta.HasTMDB()) {
+		return fmt.Errorf("movie intake needs an imdb id or a tmdb id with WISP_TMDB_API_KEY set (no way to gate release otherwise)")
+	}
 	item := store.Monitored{
 		Key: monitorKey(r.MediaType, r.IMDbID, r.TMDbID), MediaType: r.MediaType,
 		IMDbID: r.IMDbID, TMDbID: r.TMDbID, TVDbID: r.TVDbID, Title: r.Title,
 		Year: r.Year, Qualities: r.Qualities, Seasons: r.Seasons, DueAt: m.now(),
 		Enabled: true,
 	}
+	m.mu.Lock()
 	// A later request for the same title extends the existing monitor (e.g. a new
 	// season, or a 4K request on top of HD) rather than replacing it. A request
-	// that scopes no seasons widens coverage to all seasons. Re-requesting clears
-	// Completed so the new work is picked up.
+	// that scopes no seasons widens coverage to all seasons. Re-requesting resets
+	// DueAt to now and clears Completed so the new work is picked up.
 	if existing, _ := m.store.GetMonitored(ctx, item.Key); existing != nil {
 		item.AddedAt = existing.AddedAt
 		item.Qualities = unionStrings(existing.Qualities, r.Qualities)
@@ -120,7 +131,9 @@ func (m *Monitor) Intake(ctx context.Context, r Request) error {
 			item.Seasons = unionInts(existing.Seasons, r.Seasons)
 		}
 	}
-	if err := m.store.PutMonitored(ctx, item); err != nil {
+	err := m.store.PutMonitored(ctx, item)
+	m.mu.Unlock()
+	if err != nil {
 		return err
 	}
 	m.log.Info("monitoring", "key", item.Key, "title", item.Title)
@@ -175,29 +188,61 @@ func (m *Monitor) checkDue(ctx context.Context) time.Time {
 		if !it.Enabled || it.Completed {
 			continue // paused, or a fully-pinned movie kept for history
 		}
-		due := it.DueAt
-		if !due.After(now) {
-			var errMsg string
-			if it.MediaType == "series" {
-				due, errMsg = m.processSeries(ctx, it)
-			} else {
-				due, it.Completed, errMsg = m.processMovie(ctx, it)
+		if it.DueAt.After(now) {
+			if earliest.IsZero() || it.DueAt.Before(earliest) {
+				earliest = it.DueAt
 			}
-			it.DueAt = due
-			it.LastChecked = now
-			it.LastError = errMsg
-			if err := m.store.PutMonitored(ctx, it); err != nil {
-				m.log.Warn("update monitored", "key", it.Key, "error", err)
-			}
-			if it.Completed {
-				continue // no future wake needed for a finished movie
-			}
+			continue // not due yet
 		}
-		if earliest.IsZero() || due.Before(earliest) {
-			earliest = due
+		// Process outside the lock (it's network-bound); persistResult then folds
+		// the result into the current record without clobbering a concurrent
+		// Intake or delete.
+		var (
+			due       time.Time
+			completed bool
+			errMsg    string
+		)
+		if it.MediaType == "series" {
+			due, errMsg = m.processSeries(ctx, it)
+		} else {
+			due, completed, errMsg = m.processMovie(ctx, it)
+		}
+		if effective := m.persistResult(ctx, it, due, completed, errMsg); !effective.IsZero() {
+			if earliest.IsZero() || effective.Before(earliest) {
+				earliest = effective
+			}
 		}
 	}
 	return earliest
+}
+
+// persistResult folds a scheduler pass's outcome (next-due, completed, error)
+// into the stored item under the lock. If a concurrent Intake changed the item
+// since our snapshot (UpdatedAt differs), its DueAt/Completed win — we only
+// record LastChecked/LastError. Returns the item's effective next-due time, or
+// zero if it was deleted or is complete (no wake needed).
+func (m *Monitor) persistResult(ctx context.Context, snapshot store.Monitored, due time.Time, completed bool, errMsg string) time.Time {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	cur, err := m.store.GetMonitored(ctx, snapshot.Key)
+	if err != nil || cur == nil {
+		return time.Time{} // deleted concurrently — drop
+	}
+	cur.LastChecked = m.now()
+	cur.LastError = errMsg
+	if cur.UpdatedAt.Equal(snapshot.UpdatedAt) {
+		cur.DueAt = due
+		if snapshot.MediaType != "series" {
+			cur.Completed = completed
+		}
+	}
+	if e := m.store.PutMonitored(ctx, *cur); e != nil {
+		m.log.Warn("update monitored", "key", cur.Key, "error", e)
+	}
+	if cur.Completed {
+		return time.Time{}
+	}
+	return cur.DueAt
 }
 
 // processMovie pins a released+available movie (marking it Completed) or returns
@@ -215,7 +260,7 @@ func (m *Monitor) processMovie(ctx context.Context, it store.Monitored) (next ti
 	case release.After(now):
 		return release, false, "" // wake at release
 	}
-	pinned, err := m.ful.PinnedKeys(ctx, it.IMDbID)
+	pinned, err := m.ful.PinnedKeys(ctx, monitoredSearchID(it))
 	if err != nil {
 		pinned = map[PinKey]bool{}
 	}
@@ -237,18 +282,30 @@ func (m *Monitor) processSeries(ctx context.Context, it store.Monitored) (next t
 	if len(it.Seasons) > 0 {
 		all = filterSeasons(all, it.Seasons) // honor a per-season Seerr request
 	}
-	pinned, err := m.ful.PinnedKeys(ctx, it.IMDbID)
+	pinned, err := m.ful.PinnedKeys(ctx, monitoredSearchID(it))
 	if err != nil {
 		pinned = map[PinKey]bool{}
 	}
+	remaining := 0
 	for _, ep := range all {
 		if ep.Aired.IsZero() || ep.Aired.After(now) {
 			continue // not aired yet
 		}
-		m.pinMissing(ctx, targetsForQualities(it, ep.Season, ep.Number), pinned)
+		remaining += m.pinMissing(ctx, targetsForQualities(it, ep.Season, ep.Number), pinned)
 	}
-	if next, ok := metadata.NextAir(all, now); ok {
-		return next, "" // wake right around the next airing
+	nextAir, hasNext := metadata.NextAir(all, now)
+	// A stream usually lags an episode's air time (minutes to hours). If an aired
+	// episode is still unpinned, retry at the interval — don't defer to the next
+	// airstamp, which could be a week (or a mid-season gap) away.
+	if remaining > 0 {
+		retry := now.Add(m.interval)
+		if hasNext && nextAir.Before(retry) {
+			return nextAir, ""
+		}
+		return retry, ""
+	}
+	if hasNext {
+		return nextAir, "" // all aired episodes pinned — wake near the next airing
 	}
 	return now.Add(m.interval), "" // no known upcoming episode — check again at the ceiling
 }
@@ -343,6 +400,15 @@ func unionInts(a, b []int) []int {
 		}
 	}
 	return out
+}
+
+// monitoredSearchID is the id an item's pins are stored under — the same
+// fallback app.pin uses (imdb, else "tmdb:<id>") — so dedupe lookups match.
+func monitoredSearchID(it store.Monitored) string {
+	if it.IMDbID != "" {
+		return it.IMDbID
+	}
+	return "tmdb:" + it.TMDbID
 }
 
 func monitorKey(mediaType, imdb, tmdb string) string {

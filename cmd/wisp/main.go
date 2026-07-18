@@ -13,6 +13,7 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -162,6 +163,10 @@ type app struct {
 	seerr     *seerr.Client
 	mountPath string
 	startedAt time.Time
+	// pinMu serializes the store-mutation half of pin() (list → upsert → delete
+	// of superseded pins) so concurrent pins — API and scheduler — can't clobber
+	// each other. The network resolve runs outside it.
+	pinMu sync.Mutex
 }
 
 type addRequest struct {
@@ -244,34 +249,45 @@ func (a *app) pin(ctx context.Context, s pinSpec) (vpath string, size int64, err
 	} else {
 		vpath = library.EpisodePath(s.Title, s.Year, s.Season, s.Episode, ids, quality, ext)
 	}
-	// A supersede/rename is the *same quality tier* landing at a new path (e.g. a
-	// re-resolve changed the extension). Pins that differ only by quality are
-	// distinct targets and must coexist, so quality is part of the identity here.
-	existing, _ := a.store.List(ctx)
-	var renamed []store.Pin
-	for _, old := range existing {
-		if old.IMDbID == searchID && old.Season == s.Season && old.Episode == s.Episode &&
-			strings.EqualFold(old.Quality, quality) && old.VirtualPath != vpath {
-			renamed = append(renamed, old)
-		}
-	}
 	pin := store.Pin{
 		MediaType: s.MediaType, IMDbID: searchID, Season: s.Season, Episode: s.Episode,
 		Title: s.Title, Year: s.Year, Quality: quality, VirtualPath: vpath,
 		SourceURL: sourceURL, Size: size, ResolvedAt: time.Now(),
 	}
-	if err := a.store.Upsert(ctx, pin); err != nil {
-		return "", 0, err
-	}
-	a.log.Info("pinned", "path", vpath, "size", size)
-	for _, old := range renamed {
-		if deleted, e := a.store.Delete(ctx, old.VirtualPath); e != nil {
-			a.log.Warn("remove renamed pin", "path", old.VirtualPath, "error", e)
-		} else if deleted {
-			a.webhook.Rename(ctx, s.MediaType, old.VirtualPath, vpath)
+	// Serialize the store mutation so concurrent pins (API + scheduler) can't race
+	// on list→upsert→delete. A supersede/rename is the *same quality tier* landing
+	// at a new path (e.g. a re-resolve changed the extension); pins that differ
+	// only by quality are distinct targets and must coexist, so quality is part of
+	// the identity here.
+	a.pinMu.Lock()
+	existing, _ := a.store.List(ctx)
+	var renamedPaths []string
+	for _, old := range existing {
+		if old.IMDbID == searchID && old.Season == s.Season && old.Episode == s.Episode &&
+			strings.EqualFold(old.Quality, quality) && old.VirtualPath != vpath {
+			renamedPaths = append(renamedPaths, old.VirtualPath)
 		}
 	}
-	if len(renamed) == 0 {
+	if err := a.store.Upsert(ctx, pin); err != nil {
+		a.pinMu.Unlock()
+		return "", 0, err
+	}
+	var superseded []string
+	for _, oldPath := range renamedPaths {
+		if deleted, e := a.store.Delete(ctx, oldPath); e != nil {
+			a.log.Warn("remove renamed pin", "path", oldPath, "error", e)
+		} else if deleted {
+			superseded = append(superseded, oldPath)
+		}
+	}
+	a.pinMu.Unlock()
+
+	a.log.Info("pinned", "path", vpath, "size", size)
+	// Notify the media server outside the lock (network, best-effort).
+	for _, oldPath := range superseded {
+		a.webhook.Rename(ctx, s.MediaType, oldPath, vpath)
+	}
+	if len(renamedPaths) == 0 {
 		a.webhook.Import(ctx, s.MediaType, vpath)
 	}
 	return vpath, size, nil

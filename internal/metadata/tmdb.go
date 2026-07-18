@@ -59,31 +59,27 @@ func (s *Service) MovieHomeRelease(ctx context.Context, tmdbID string) (time.Tim
 	return time.Time{}, ErrNoHomeRelease
 }
 
-// selectHomeRelease picks the earliest type-4 (digital) date across the
-// configured markets, then the earliest type-5 (physical). Types 1-3 are
-// premiere/theatrical and type 6 is TV — none imply a home stream exists.
+// selectHomeRelease picks the earliest home-media date — digital (type 4) or
+// physical (type 5), whichever comes first — across the configured markets.
+// Types 1-3 are premiere/theatrical and type 6 is TV; none imply a home stream
+// exists, so they never make a movie eligible.
 func selectHomeRelease(payload tmdbReleaseDates, markets []string) (time.Time, bool) {
 	want := make(map[string]bool, len(markets))
 	for _, m := range markets {
 		want[strings.ToUpper(strings.TrimSpace(m))] = true
 	}
-	for _, kind := range []int{4, 5} {
-		var earliest time.Time
-		for _, r := range payload.Results {
-			if len(want) > 0 && !want[strings.ToUpper(r.Country)] {
-				continue
-			}
-			for _, d := range r.Dates {
-				if d.Type == kind && !d.Date.IsZero() && (earliest.IsZero() || d.Date.Before(earliest)) {
-					earliest = d.Date
-				}
-			}
+	var earliest time.Time
+	for _, r := range payload.Results {
+		if len(want) > 0 && !want[strings.ToUpper(r.Country)] {
+			continue
 		}
-		if !earliest.IsZero() {
-			return earliest, true
+		for _, d := range r.Dates {
+			if (d.Type == 4 || d.Type == 5) && !d.Date.IsZero() && (earliest.IsZero() || d.Date.Before(earliest)) {
+				earliest = d.Date
+			}
 		}
 	}
-	return time.Time{}, false
+	return earliest, !earliest.IsZero()
 }
 
 // IMDbForTMDB resolves a TMDB id to its IMDb id via /external_ids. Seerr sends

@@ -2,7 +2,6 @@ package metadata
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -78,14 +77,12 @@ func NextAir(eps []Episode, after time.Time) (t time.Time, ok bool) {
 // caller keeps monitoring rather than pinning a cam).
 func (s *Service) MovieReleaseDate(ctx context.Context, imdbID, tmdbID string, now time.Time) (time.Time, error) {
 	if s.HasTMDB() && strings.TrimSpace(tmdbID) != "" {
-		t, err := s.MovieHomeRelease(ctx, tmdbID)
-		if err == nil {
-			return t, nil
-		}
-		if errors.Is(err, ErrNoHomeRelease) {
-			return time.Time{}, err // theatrical-only — do not fall back to a theatrical date
-		}
-		// Transient TMDB failure: fall through to Cinemeta.
+		// TMDB is authoritative for home-media dates. A transient TMDB failure
+		// must NOT fall back to Cinemeta, whose date is theatrical/general — that
+		// would let a title in theaters look "released" and pin a cam. Propagate
+		// the error so the monitor retries; the release stays gated until TMDB
+		// answers (with a date, or ErrNoHomeRelease for theatrical-only).
+		return s.MovieHomeRelease(ctx, tmdbID)
 	}
 	if strings.HasPrefix(strings.TrimSpace(imdbID), "tt") {
 		return s.cinemetaMovieReleased(ctx, imdbID, now)

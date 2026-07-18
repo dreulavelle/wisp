@@ -117,10 +117,15 @@ func parseSeasons(extra []struct {
 }
 
 // titleFromSubject extracts the title from a subject like "Inception (2010)".
+// It strips only a trailing "(YYYY)" year — not any parenthetical (e.g. an
+// edition like "(Director's Cut)"). Authoritative title/year from the Seerr API
+// replaces this when available.
 func titleFromSubject(subject string) string {
 	subject = strings.TrimSpace(subject)
-	if i := strings.LastIndex(subject, "("); i > 0 {
-		return strings.TrimSpace(subject[:i])
+	if yearFromSubject(subject) > 0 {
+		if i := strings.LastIndex(subject, "("); i > 0 {
+			return strings.TrimSpace(subject[:i])
+		}
 	}
 	return subject
 }
