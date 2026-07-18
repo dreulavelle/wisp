@@ -182,9 +182,24 @@ Automatically Approved**, and use this JSON payload:
 ```
 
 On approval wisp resolves the movie/series, pins what's aired, and monitors the
-rest — 4K requests become a `[2160p]` file, standard requests `[1080p]`. Set
-`WISP_SEERR_URL`/`WISP_SEERR_API_KEY` so wisp reads the request's seasons and 4K
-flag authoritatively from the Seerr API (the webhook alone underspecifies them).
+rest.
+
+**`WISP_SEERR_URL` / `WISP_SEERR_API_KEY` are optional but recommended.** wisp
+never polls Seerr — the webhook is the push. The catch is that the webhook can't
+reliably carry two things: whether a request is **4K** (Overseerr exposes no
+per-request 4K field in its webhook at all) and, depending on your Overseerr
+version/template, the requested **seasons**. So when a webhook arrives, wisp makes
+**one reactive call back to the Seerr API** to read that request's authoritative
+`is4k` + seasons. That's the *only* thing the credentials do — there are no other
+API calls, and nothing is polled.
+
+Without them wisp still works, with two degradations:
+
+- every request is treated as **1080p** (no HD/4K split), and
+- a request fulfills the **whole show** rather than the specific seasons asked for.
+
+Set them if you want the 4K tier split or per-season scoping; leave them blank if
+you don't care about either.
 
 You can also drive monitoring directly (Seerr optional):
 
@@ -206,8 +221,8 @@ curl -X POST http://localhost:8080/api/monitors/refresh      # re-check now
 | `WISP_LISTEN_ADDR` | `:8080` | HTTP bind address |
 | `WISP_DB_PATH` | `/data/wisp.db` | Pin + monitor database (persist this) |
 | `WISP_MOUNT_PATH` | — | Self-mount here (needs `/dev/fuse` + `SYS_ADMIN`); unset = HTTP only |
-| `WISP_SEERR_URL` | — | Overseerr/Jellyseerr base URL (enables request enrichment) |
-| `WISP_SEERR_API_KEY` | — | Seerr API key (authoritative seasons + 4K intent) |
+| `WISP_SEERR_URL` | — | Optional but recommended. Overseerr/Jellyseerr base URL — only used to read a request's 4K flag + seasons back (reactively, per webhook; never polled). Blank = all requests treated as 1080p, whole-show |
+| `WISP_SEERR_API_KEY` | — | Optional but recommended. Seerr API key for the enrichment above |
 | `WISP_SCHEDULE_INTERVAL` | `2h` | Monitor re-check ceiling (it wakes near the next airstamp regardless) |
 | `WISP_TMDB_API_KEY` | — | TMDB v3 key or v4 token — enables home-media release gating for movies |
 | `WISP_TMDB_MARKETS` | `US,CA,GB,AU,DE,FR,IT,ES,JP,IN` | Regions whose digital/physical dates release a movie |
