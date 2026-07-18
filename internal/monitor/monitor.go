@@ -92,6 +92,10 @@ func New(st *store.Store, meta *metadata.Service, ful Fulfiller, interval time.D
 	}
 }
 
+// Interval reports the fallback re-check ceiling — the longest the scheduler
+// will sleep when no sooner airstamp/release is known.
+func (m *Monitor) Interval() time.Duration { return m.interval }
+
 // Intake registers a request and wakes the scheduler to act on it immediately.
 // A tmdb-only request is resolved to its imdb id (series enumeration needs it).
 func (m *Monitor) Intake(ctx context.Context, r Request) error {
