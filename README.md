@@ -113,17 +113,24 @@ All targets fire on three events:
 
 ### Silo (recommended)
 
-Create one ARR-compatible webhook source in **Silo → Autoscan → Sources**, copy
-its webhook URL, and add it to wisp:
+Create one webhook source in **Silo → Autoscan → Sources**, copy its webhook
+URL, and add it to wisp:
 
 ```yaml
 environment:
   WISP_NOTIFY_ARR_WEBHOOK_URL: https://silo.example.com/api/v1/autoscan/webhooks/<secret>
 ```
 
+> **This is not Radarr/Sonarr integration** — wisp needs no Radarr or Sonarr, and
+> talks to neither. The `ARR` in the variable name refers only to the *wire
+> format*: wisp emits the JSON shape that a Sonarr/Radarr webhook would send,
+> because that is the payload media-server autoscan intakes (Silo's included)
+> accept natively. wisp is the sole source of these notifications.
+
 `WISP_SILO_WEBHOOK_URL` is still accepted as a deprecated alias (if both are set,
-the canonical `WISP_NOTIFY_ARR_WEBHOOK_URL` wins). This is the same Sonarr/Radarr
-webhook shape, so it also drives a real Sonarr/Radarr instance.
+the canonical `WISP_NOTIFY_ARR_WEBHOOK_URL` wins). Because it is that standard
+webhook format, it can also drive an actual Sonarr/Radarr instance if you happen
+to run one — but that is entirely optional and unrelated to wisp's operation.
 
 ### Jellyfin / Emby
 
