@@ -26,6 +26,8 @@ type Config struct {
 	// MountAllowOther exposes the mount to other users (needed when another
 	// container reads the mount as a different UID).
 	MountAllowOther bool
+	// LogLevel is one of debug, info, warn, error.
+	LogLevel string
 }
 
 // SelfMount reports whether wisp should mount the library itself.
@@ -40,6 +42,7 @@ func Load() (*Config, error) {
 		DBPath:             envOr("WISP_DB_PATH", "/data/wisp.db"),
 		MountPath:          strings.TrimSpace(os.Getenv("WISP_MOUNT_PATH")),
 		MountAllowOther:    boolEnv("WISP_MOUNT_ALLOW_OTHER", true),
+		LogLevel:           strings.ToLower(envOr("WISP_LOG_LEVEL", "info")),
 	}
 	if c.AIOStreamsURL == "" {
 		return nil, fmt.Errorf("WISP_AIOSTREAMS_URL is required")

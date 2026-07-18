@@ -23,13 +23,12 @@ import (
 )
 
 func main() {
-	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
-
 	cfg, err := config.Load()
 	if err != nil {
-		log.Error("config", "error", err)
+		slog.Error("config", "error", err)
 		os.Exit(1)
 	}
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: parseLevel(cfg.LogLevel)}))
 	st, err := store.Open(cfg.DBPath)
 	if err != nil {
 		log.Error("open store", "error", err)
@@ -90,6 +89,20 @@ func main() {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_ = httpSrv.Shutdown(shutdownCtx)
+}
+
+// parseLevel maps a config string to a slog level, defaulting to info.
+func parseLevel(s string) slog.Level {
+	switch s {
+	case "debug":
+		return slog.LevelDebug
+	case "warn":
+		return slog.LevelWarn
+	case "error":
+		return slog.LevelError
+	default:
+		return slog.LevelInfo
+	}
 }
 
 // portOf extracts ":8080" from a listen address like ":8080" or "0.0.0.0:8080".

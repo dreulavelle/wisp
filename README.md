@@ -80,6 +80,7 @@ Add a movie: `"media_type": "movie"`, omit `season`/`episode`.
 | `WISP_DB_PATH` | `/data/wisp.db` | Pin database |
 | `WISP_MOUNT_PATH` | — | Self-mount here (needs `/dev/fuse` + `SYS_ADMIN`); unset = HTTP only |
 | `WISP_MOUNT_ALLOW_OTHER` | `true` | Let other UIDs read the mount |
+| `WISP_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, or `error` |
 
 ## Status
 

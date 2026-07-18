@@ -255,3 +255,52 @@ func TestConcurrentRangeReads(t *testing.T) {
 
 func fmtRange(a, b int) string        { return fmt.Sprintf("bytes=%d-%d", a, b) }
 func fmtErr(f string, a ...any) error { return fmt.Errorf(f, a...) }
+
+// TestPathTraversalCannotEscape proves the server never touches the filesystem:
+// odd or traversal-style paths resolve only against pinned bbolt keys, so they
+// can only ever 404, never read a real file.
+func TestPathTraversalCannotEscape(t *testing.T) {
+	st := newTestStore(t)
+	pinEpisode(t, st, "http://x", 1)
+	srv := New(st, nil, discard())
+
+	for _, target := range []string{
+		"/../../../../etc/passwd",
+		"/..%2f..%2fetc%2fpasswd",
+		"/shows/../../../etc/passwd",
+		"/./shows/./",
+	} {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, target, nil)
+		srv.FileHandler(rec, req)
+		body := rec.Body.String()
+		if strings.Contains(body, "root:") || strings.Contains(body, "/bin/") {
+			t.Fatalf("target %q leaked filesystem content: %q", target, body)
+		}
+		if rec.Code != http.StatusNotFound && rec.Code != http.StatusOK {
+			t.Fatalf("target %q status = %d", target, rec.Code)
+		}
+	}
+}
+
+// TestUnknownFile404s proves a request for a path with no pin is a clean 404.
+func TestUnknownFile404s(t *testing.T) {
+	st := newTestStore(t)
+	srv := New(st, nil, discard())
+	rec := httptest.NewRecorder()
+	srv.FileHandler(rec, getReq("shows/Ghost (2099)/Season 01/nope.mkv"))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", rec.Code)
+	}
+}
+
+// TestMethodNotAllowed proves non-GET/HEAD methods are rejected cleanly.
+func TestMethodNotAllowed(t *testing.T) {
+	st := newTestStore(t)
+	srv := New(st, nil, discard())
+	rec := httptest.NewRecorder()
+	srv.FileHandler(rec, httptest.NewRequest(http.MethodPost, "/", nil))
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d, want 405", rec.Code)
+	}
+}
