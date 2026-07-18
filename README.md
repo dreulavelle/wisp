@@ -2,29 +2,34 @@
 
 ![CI](https://github.com/dreulavelle/wisp/actions/workflows/ci.yml/badge.svg)
 
-A resolver-backed virtual filesystem for [AIOStreams](https://github.com/Viren070/AIOStreams).
+A standalone request-to-playback engine for [AIOStreams](https://github.com/Viren070/AIOStreams).
 
 wisp turns the streams AIOStreams selects into ordinary-looking media files. It
 never downloads anything — each virtual file's bytes are range-proxied from the
 resolved stream on demand. Point any media server (Silo, Plex, Jellyfin, Emby)
 at the mount and it scans, probes, and plays them like local files.
 
-> **Designed for AIOStreams.** wisp is built to run alongside
-> [AIOStreams](https://github.com/Viren070/AIOStreams) and the
-> [AIOStreams Silo plugin](https://github.com/drondeseries/silo-plugin-aiostreams),
-> and it talks to AIOStreams' Search API directly (not the generic Stremio addon
-> protocol) — so AIOStreams is required. That's not really a limit, though:
+Point [Overseerr/Jellyseerr](https://github.com/seerr-team/seerr) at wisp and the
+whole stack is just **Seerr + wisp + AIOStreams** — no `*arr` apps, no download
+client, no media-server plugin. Seerr owns requests, approvals, and users; wisp
+owns release scheduling, stream resolution, and the virtual library.
+
+> **AIOStreams is required.** wisp talks to AIOStreams' Search API directly (not
+> the generic Stremio addon protocol). That's the point of leverage, not a limit:
 > AIOStreams is the aggregator, so whatever Stremio scrapers, debrid services, or
 > usenet sources you configure *there* (Torrentio, Comet, MediaFusion, Easynews,
-> …) all flow through to wisp. Any feeder that can POST to wisp's tiny
-> [API](#api) works; the bundled Silo plugin is just the first one.
+> …) all flow through to wisp.
 
 ## How it works
 
-- **Add** a movie or episode via the API. wisp asks AIOStreams for the best
-  stream and pins the selection (URL + size).
-- **Mount** wisp with rclone. The pinned files appear in a normal
-  `movies/` and `shows/` layout.
+- **Request.** A user approves a request in Seerr; its webhook hits wisp. wisp
+  checks eligibility (home-media release for movies, aired episodes for series),
+  pins what's available now, and **monitors** the rest.
+- **Monitor.** wisp keeps a persistent watchlist and pins unreleased movies and
+  newly-aired episodes as they land — waking near the next airstamp, not polling
+  blindly. (Or feed it directly via the [API](#api); Seerr is optional.)
+- **Mount.** wisp self-mounts with embedded rclone; pins appear in a normal
+  `movies/` and `shows/` layout that any media server scans.
 - **Play.** On open, wisp range-proxies bytes from the pinned stream, which
   re-unlocks the debrid link on every request. If a link has died, wisp
   re-resolves through AIOStreams and playback self-heals.
@@ -155,6 +160,26 @@ curl -X DELETE http://localhost:8080/api/pins -d '{"imdb_id":"tt38262097","seaso
 curl -X DELETE http://localhost:8080/api/pins -d '{"imdb_id":"tt38262097","season":1,"episode":4,"quality":"2160p"}'
 ```
 
+### Requests & monitoring
+
+Point a Seerr webhook at `POST /api/seerr` (Seerr → **Settings → Notifications →
+Webhook**, JSON payload, on *Request Approved* / *Auto-Approved*). On approval
+wisp resolves the movie/series, pins what's aired, and monitors the rest — 4K
+requests become a `[2160p]` file, standard requests `[1080p]`. Set
+`WISP_SEERR_URL`/`WISP_SEERR_API_KEY` so wisp can read the request's seasons and
+4K flag authoritatively.
+
+You can also drive monitoring directly (Seerr optional):
+
+```sh
+# monitor a title (media-server-neutral)
+curl -X POST http://localhost:8080/api/monitors \
+  -d '{"media_type":"series","imdb_id":"tt38262097","title":"The Villager of Level 999","year":2026,"qualities":["1080p"]}'
+curl http://localhost:8080/api/monitors                      # list the watchlist
+curl -X DELETE "http://localhost:8080/api/monitors?key=series:tt38262097"
+curl -X POST http://localhost:8080/api/monitors/refresh      # re-check now
+```
+
 ## Configuration
 
 | Env | Default | Notes |
@@ -162,8 +187,13 @@ curl -X DELETE http://localhost:8080/api/pins -d '{"imdb_id":"tt38262097","seaso
 | `WISP_AIOSTREAMS_URL` | — | AIOStreams manifest URL (required) |
 | `WISP_AIOSTREAMS_PASSWORD` | — | Addon password |
 | `WISP_LISTEN_ADDR` | `:8080` | HTTP bind address |
-| `WISP_DB_PATH` | `/data/wisp.db` | Pin database |
+| `WISP_DB_PATH` | `/data/wisp.db` | Pin + monitor database (persist this) |
 | `WISP_MOUNT_PATH` | — | Self-mount here (needs `/dev/fuse` + `SYS_ADMIN`); unset = HTTP only |
+| `WISP_SEERR_URL` | — | Overseerr/Jellyseerr base URL (enables request enrichment) |
+| `WISP_SEERR_API_KEY` | — | Seerr API key (authoritative seasons + 4K intent) |
+| `WISP_SCHEDULE_INTERVAL` | `2h` | Monitor re-check ceiling (it wakes near the next airstamp regardless) |
+| `WISP_TMDB_API_KEY` | — | TMDB v3 key or v4 token — enables home-media release gating for movies |
+| `WISP_TMDB_MARKETS` | `US,CA,GB,AU,DE,FR,IT,ES,JP,IN` | Regions whose digital/physical dates release a movie |
 | `WISP_SILO_WEBHOOK_URL` | — | Optional Silo Autoscan webhook for instant import, rename, and delete updates |
 | `WISP_MOUNT_ALLOW_OTHER` | `true` | Let other UIDs read the mount |
 | `WISP_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, or `error` |
