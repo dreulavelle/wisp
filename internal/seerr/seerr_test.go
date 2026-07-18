@@ -98,3 +98,21 @@ func TestClientEnrichNoopWhenUnconfigured(t *testing.T) {
 		t.Fatalf("intake mutated: %#v", in)
 	}
 }
+
+// Overseerr renders empty ids as "" (e.g. a movie has no tvdbId) and sometimes
+// as numbers or null. None of these may fail the whole webhook decode.
+func TestParseWebhookFlexibleIds(t *testing.T) {
+	cases := []string{
+		`{"notification_type":"MEDIA_APPROVED","subject":"Inception (2010)","media":{"media_type":"movie","tmdbId":"27205","tvdbId":"","imdbId":"tt1375666"},"request":{"request_id":""}}`,
+		`{"notification_type":"MEDIA_APPROVED","subject":"Inception (2010)","media":{"media_type":"movie","tmdbId":27205,"tvdbId":null,"imdbId":"tt1375666"},"request":{"request_id":42}}`,
+	}
+	for i, body := range cases {
+		in, actionable, err := ParseWebhook([]byte(body))
+		if err != nil || !actionable {
+			t.Fatalf("case %d: actionable=%v err=%v", i, actionable, err)
+		}
+		if in.TMDbID != "27205" || in.TVDbID != "" || in.IMDbID != "tt1375666" {
+			t.Fatalf("case %d: intake = %#v", i, in)
+		}
+	}
+}

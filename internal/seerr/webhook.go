@@ -24,21 +24,46 @@ type Intake struct {
 	RequestID int // Seerr request id, for API enrichment (0 if unknown)
 }
 
+// flexNum decodes an id that Seerr may render as a JSON number, a numeric
+// string, an empty string, or null. Overseerr's webhook template emits empty ids
+// as "" (a movie has no tvdbId → "tvdbId": ""), which plain json.Number rejects
+// — failing the whole decode. This tolerates all of those.
+type flexNum string
+
+func (f *flexNum) UnmarshalJSON(b []byte) error {
+	s := strings.TrimSpace(string(b))
+	if s == "null" {
+		*f = ""
+		return nil
+	}
+	*f = flexNum(strings.TrimSpace(strings.Trim(s, `"`))) // unwrap a JSON string if present
+	return nil
+}
+
+// str returns the id, or "" for empty/zero.
+func (f flexNum) str() string {
+	s := strings.TrimSpace(string(f))
+	if s == "" || s == "0" {
+		return ""
+	}
+	return s
+}
+
 // webhookPayload mirrors the fields of Overseerr/Jellyseerr's default JSON
-// notification that wisp needs. Ids arrive as numbers or strings across
-// versions, so they are decoded leniently.
+// notification that wisp needs. Ids arrive as numbers or strings (and sometimes
+// empty) across versions, so flexNum decodes them leniently.
 type webhookPayload struct {
 	NotificationType string `json:"notification_type"`
 	Subject          string `json:"subject"`
 	Media            struct {
-		MediaType string      `json:"media_type"`
-		TMDbID    json.Number `json:"tmdbId"`
-		TVDbID    json.Number `json:"tvdbId"`
-		IMDbID    string      `json:"imdbId"`
+		MediaType string  `json:"media_type"`
+		TMDbID    flexNum `json:"tmdbId"`
+		TVDbID    flexNum `json:"tvdbId"`
+		IMDbID    string  `json:"imdbId"`
 	} `json:"media"`
 	Request struct {
-		RequestID json.Number `json:"request_id"`
-		Is4K      *bool       `json:"is4k"`
+		RequestID flexNum `json:"request_id"`
+		Is4K      *bool   `json:"is4k"`
 	} `json:"request"`
 	Extra []struct {
 		Name  string `json:"name"`
@@ -67,13 +92,13 @@ func ParseWebhook(body []byte) (in *Intake, actionable bool, err error) {
 	}
 	intake := &Intake{
 		MediaType: mediaType,
-		TMDbID:    numStr(p.Media.TMDbID),
-		TVDbID:    numStr(p.Media.TVDbID),
+		TMDbID:    p.Media.TMDbID.str(),
+		TVDbID:    p.Media.TVDbID.str(),
 		IMDbID:    strings.TrimSpace(p.Media.IMDbID),
 		Title:     titleFromSubject(p.Subject),
 		Year:      yearFromSubject(p.Subject),
 		Seasons:   parseSeasons(p.Extra),
-		RequestID: atoiSafe(numStr(p.Request.RequestID)),
+		RequestID: atoiSafe(p.Request.RequestID.str()),
 	}
 	// The default webhook template exposes no reliable per-request 4K flag
 	// (media.status4k is the title's overall 4K status, not this request's), so
@@ -140,14 +165,6 @@ func yearFromSubject(subject string) int {
 		}
 	}
 	return 0
-}
-
-func numStr(n json.Number) string {
-	s := strings.TrimSpace(n.String())
-	if s == "" || s == "0" {
-		return ""
-	}
-	return s
 }
 
 func atoiSafe(s string) int {
