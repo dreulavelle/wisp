@@ -46,6 +46,14 @@ func TestEventsUseARRPayloadsAndMountPath(t *testing.T) {
 	if payloads[2]["eventType"] != "MovieFileDelete" {
 		t.Fatalf("delete = %#v", payloads[2])
 	}
+	movie := payloads[2]["movie"].(map[string]any)
+	if movie["folderPath"] != "/mnt/wisp/movies/New" {
+		t.Fatalf("delete movie = %#v", movie)
+	}
+	deletedFile := payloads[2]["movieFile"].(map[string]any)
+	if deletedFile["relativePath"] != "movie.mkv" {
+		t.Fatalf("delete file = %#v", deletedFile)
+	}
 }
 
 func TestDisabledWebhookIsNoop(t *testing.T) {

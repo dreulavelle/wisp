@@ -55,13 +55,16 @@ func (c *Client) Rename(ctx context.Context, mediaType, previousPath, newPath st
 
 func (c *Client) Delete(ctx context.Context, mediaType, virtualPath string) {
 	fullPath := c.fullPath(virtualPath)
-	payload := map[string]any{}
+	file := map[string]string{"path": fullPath, "relativePath": path.Base(fullPath)}
+	payload := map[string]any{"instanceName": "Wisp", "deleteReason": "Manual"}
 	if mediaType == "series" {
 		payload["eventType"] = "EpisodeFileDelete"
-		payload["episodeFile"] = map[string]string{"path": fullPath}
+		payload["series"] = map[string]string{"path": path.Dir(path.Dir(fullPath))}
+		payload["episodeFile"] = file
 	} else {
 		payload["eventType"] = "MovieFileDelete"
-		payload["movieFile"] = map[string]string{"path": fullPath}
+		payload["movie"] = map[string]string{"folderPath": path.Dir(fullPath)}
+		payload["movieFile"] = file
 	}
 	c.send(ctx, "delete", payload)
 }
