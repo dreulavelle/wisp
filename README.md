@@ -26,7 +26,7 @@ transcode, and seeking all work.
 ## Quick start
 
 wisp embeds rclone and self-mounts the library — one container, no separate
-rclone process. This is the whole setup:
+rclone process. Your media server reads the same mount. This is the whole stack:
 
 ```yaml
 services:
@@ -39,7 +39,7 @@ services:
       WISP_MOUNT_PATH: /mnt/wisp            # wisp mounts the library here
     volumes:
       - ./data:/data                        # persist the pin database
-      - /mnt/wisp:/mnt/wisp:rshared         # propagate the mount to the host
+      - /mnt/wisp:/mnt/wisp:rshared         # share the mount out to the host
     devices:
       - /dev/fuse
     cap_add:
@@ -48,24 +48,35 @@ services:
       - apparmor:unconfined
     ports:
       - "8080:8080"
+
+  # Your media server — Silo, Plex, Jellyfin, Emby. Bind the mount :rslave so it
+  # sees wisp's FUSE mount, and re-sees it if wisp restarts.
+  media-server:
+    image: your/media-server
+    depends_on: [wisp]
+    volumes:
+      - /mnt/wisp:/mnt/wisp:ro,rslave
 ```
 
-Share the host mountpoint once so the FUSE mount reaches the host and other
-containers, then point your media server's library at `/mnt/wisp` (bind it
-`:rslave`):
+Prepare the host mountpoint once, so the in-container FUSE mount propagates out
+to the host and into the media-server container:
 
 ```sh
+mkdir -p /mnt/wisp
 mount --bind /mnt/wisp /mnt/wisp && mount --make-rshared /mnt/wisp
 ```
 
-See [Deployment](docs/Deployment.md) for the full propagation setup.
+Point the media server's library at `/mnt/wisp`, feed wisp a title (see
+[API](#api)), and it appears as a real file ready to scan and play. See
+[Deployment](docs/Deployment.md) for propagation details and making the
+host-share survive reboots.
 
 `rm` on a mounted media file unpins it from wisp; creating, editing, and
 renaming mounted files stay read-only by design.
 
 > **HTTP-only alternative.** Leave `WISP_MOUNT_PATH` unset (and drop `devices`,
-> `cap_add`, and `security_opt`) to serve the library over HTTP on `:8080` and
-> mount it yourself with rclone however you like.
+> `cap_add`, `security_opt`, and the `:rshared` volume) to serve the library
+> over HTTP on `:8080` and mount it yourself with rclone.
 
 ## Instant Silo Autoscan
 
