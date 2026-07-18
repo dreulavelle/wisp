@@ -25,38 +25,47 @@ transcode, and seeking all work.
 
 ## Quick start
 
+wisp embeds rclone and self-mounts the library — one container, no separate
+rclone process. This is the whole setup:
+
 ```yaml
 services:
   wisp:
     image: ghcr.io/dreulavelle/wisp:latest
+    container_name: wisp
     environment:
       WISP_AIOSTREAMS_URL: https://your-aiostreams/stremio/<uuid>/<config>/manifest.json
       WISP_AIOSTREAMS_PASSWORD: your-addon-password
+      WISP_MOUNT_PATH: /mnt/wisp            # wisp mounts the library here
     volumes:
-      - ./data:/data
-    ports:
-      - "8080:8080"
-```
-
-```yaml
-    # add to the service above to self-mount:
+      - ./data:/data                        # persist the pin database
+      - /mnt/wisp:/mnt/wisp:rshared         # propagate the mount to the host
     devices:
       - /dev/fuse
     cap_add:
       - SYS_ADMIN
-    environment:
-      WISP_MOUNT_PATH: /mnt/wisp        # wisp mounts itself here
-    volumes:
-      - /mnt/wisp:/mnt/wisp:rshared     # propagate the mount to the host
+    security_opt:
+      - apparmor:unconfined
+    ports:
+      - "8080:8080"
 ```
 
-wisp embeds rclone and mounts the library itself — no separate rclone
-container or process. Point your media server's library at `/mnt/wisp`. Leave
-`WISP_MOUNT_PATH` unset to serve HTTP only and mount it however you like.
+Share the host mountpoint once so the FUSE mount reaches the host and other
+containers, then point your media server's library at `/mnt/wisp` (bind it
+`:rslave`):
 
-The self-mounted library supports deletion: `rm` on a mounted media file unpins
-it from Wisp. Creating, editing, and renaming mounted files remain intentionally
-unsupported.
+```sh
+mount --bind /mnt/wisp /mnt/wisp && mount --make-rshared /mnt/wisp
+```
+
+See [Deployment](docs/Deployment.md) for the full propagation setup.
+
+`rm` on a mounted media file unpins it from wisp; creating, editing, and
+renaming mounted files stay read-only by design.
+
+> **HTTP-only alternative.** Leave `WISP_MOUNT_PATH` unset (and drop `devices`,
+> `cap_add`, and `security_opt`) to serve the library over HTTP on `:8080` and
+> mount it yourself with rclone however you like.
 
 ## Instant Silo Autoscan
 
