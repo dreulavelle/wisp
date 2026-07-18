@@ -86,3 +86,16 @@ func TestIDTags(t *testing.T) {
 		t.Fatalf("empty tag: %q", got)
 	}
 }
+
+func TestNormalizeQuality(t *testing.T) {
+	cases := map[string]string{
+		"2160p": "2160p", "4K": "2160p", "uhd": "2160p",
+		"1080p": "1080p", "1080P": "1080p",
+		"720p": "720p", "": "", "garbage": "",
+	}
+	for in, want := range cases {
+		if got := NormalizeQuality(in); got != want {
+			t.Fatalf("NormalizeQuality(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

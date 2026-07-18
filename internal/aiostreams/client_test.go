@@ -2,9 +2,11 @@ package aiostreams
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 func TestDeriveCredentials(t *testing.T) {
@@ -77,5 +79,70 @@ func TestSearchMovieID(t *testing.T) {
 	}
 	if gotID != "tt123" {
 		t.Fatalf("movie id = %q, want tt123 (no season/episode)", gotID)
+	}
+}
+
+// TestSearchClassifiesFailures proves upstream failures are typed so callers can
+// tell a config/throttle problem from a genuine no-stream condition.
+func TestSearchClassifiesFailures(t *testing.T) {
+	cases := []struct {
+		name       string
+		status     int
+		retryAfter string
+		wantKind   ErrorKind
+		wantRetry  time.Duration
+	}{
+		{"unauthorized", http.StatusUnauthorized, "", KindAuth, 0},
+		{"forbidden", http.StatusForbidden, "", KindAuth, 0},
+		{"rate limited", http.StatusTooManyRequests, "12", KindRateLimited, 12 * time.Second},
+		{"server error", http.StatusBadGateway, "", KindTransient, 0},
+		{"teapot", http.StatusTeapot, "", KindUpstream, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				if tc.retryAfter != "" {
+					w.Header().Set("Retry-After", tc.retryAfter)
+				}
+				w.WriteHeader(tc.status)
+			}))
+			defer server.Close()
+
+			c := New(server.URL+"/stremio/uuid-1/blob/manifest.json", "pw")
+			_, err := c.Search(context.Background(), "movie", "tt123", 0, 0)
+			var se *SearchError
+			if !errors.As(err, &se) {
+				t.Fatalf("error = %v, want *SearchError", err)
+			}
+			if se.Kind != tc.wantKind {
+				t.Fatalf("kind = %d, want %d", se.Kind, tc.wantKind)
+			}
+			if se.RetryAfter != tc.wantRetry {
+				t.Fatalf("retryAfter = %s, want %s", se.RetryAfter, tc.wantRetry)
+			}
+		})
+	}
+}
+
+// TestSearchTransportFailureIsTransient proves an unreachable upstream is a
+// transient error, not a no-stream condition.
+func TestSearchTransportFailureIsTransient(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	c := New(server.URL+"/stremio/uuid-1/blob/manifest.json", "pw")
+	server.Close() // now unreachable
+
+	_, err := c.Search(context.Background(), "movie", "tt123", 0, 0)
+	var se *SearchError
+	if !errors.As(err, &se) || se.Kind != KindTransient {
+		t.Fatalf("error = %v, want transient SearchError", err)
+	}
+}
+
+func TestHasCredentials(t *testing.T) {
+	if !New("https://h/stremio/uuid-1/blob/manifest.json", "pw").HasCredentials() {
+		t.Fatal("uuid + password should have credentials")
+	}
+	if New("https://h/stremio/uuid-1/blob/manifest.json", "").HasCredentials() {
+		t.Fatal("uuid without password cannot authenticate")
 	}
 }

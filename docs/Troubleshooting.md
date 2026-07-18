@@ -30,10 +30,23 @@ returned a playable stream. Usually the title genuinely has no source right now
 instance for the same `id`. If AIOStreams returns results but wisp still 502s,
 check `WISP_AIOSTREAMS_URL`/`WISP_AIOSTREAMS_PASSWORD`.
 
-## `POST /api/add` returns 502 "no playable stream"
+## `POST /api/add` errors — read the `error` code
 
-Not an error — AIOStreams has nothing to stream yet. Re-add later; a feeder
-should treat this as "retry next cycle." See [Feeding wisp](Feeding-wisp.md).
+The add response body carries a structured `{"error": "<code>"}` so you can tell
+these apart (see [API Reference](API-Reference.md#post-apiadd)):
+
+- `502 no_streams` / `502 no_quality_match` — AIOStreams has nothing (at that
+  quality) yet. Not an error; re-add next cycle.
+- `500 aiostreams_auth` — credentials were rejected. Set
+  `WISP_AIOSTREAMS_PASSWORD` (or use a URL containing the uuid). wisp also logs a
+  warning at **startup** when no usable credentials are derived.
+- `429 rate_limited` — AIOStreams throttled you; it honors `Retry-After`. Slow
+  your feeder's add rate.
+- `503 upstream_unavailable` — AIOStreams is down or unreachable; transient.
+
+Before this classification, all of these surfaced as one generic `502`, which
+made a bad password or a rate limit look like "no stream." If a feeder keeps a
+title monitored forever, check the code — an `aiostreams_auth` was likely hiding.
 
 ## Slow to start playback
 

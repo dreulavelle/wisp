@@ -22,15 +22,23 @@ Resolve a title via AIOStreams, pin the top stream, and create its virtual file.
 | `year` | number | – | Used for the folder/file name |
 | `season` | number | series | |
 | `episode` | number | series | |
-| `quality` | string | – | Optional hint; wisp labels the file with the resolution **AIOStreams actually returned**, so this is usually unnecessary |
+| `quality` | string | – | Omit → pin AIOStreams' top stream and label it with the resolution it returned. Set (`1080p`, `2160p`/`4k`, …) → pin a stream **of that resolution**, so `1080p` and `2160p` of one title become two distinct files |
 
 **Responses**
 
 - `200` → `{"virtual_path": "...", "size": 1471496964}` — pinned.
-- `502` → `no playable stream: ...` — AIOStreams has no stream yet. This is a
-  normal "retry later" signal, not an error; a feeder should re-add on its next
-  cycle.
-- `400` — invalid body / missing required field.
+- `4xx/5xx` → `{"error": "<code>", "message": "..."}` — a structured code so a
+  feeder can distinguish a genuine no-stream condition from a
+  configuration/throttling problem:
+
+  | Status | `error` | Meaning | Feeder action |
+  |--------|---------|---------|---------------|
+  | `502` | `no_streams` | AIOStreams has no stream yet | keep monitoring, re-add next cycle |
+  | `502` | `no_quality_match` | streams exist, none at the requested `quality` | keep monitoring for that tier |
+  | `500` | `aiostreams_auth` | AIOStreams rejected credentials (401/403) | fix `WISP_AIOSTREAMS_PASSWORD` — do not silently retry |
+  | `429` | `rate_limited` | AIOStreams throttled (echoes `Retry-After`) | back off |
+  | `503` | `upstream_unavailable` | transient 5xx / unreachable | retry later |
+  | `400` | – | invalid body / missing required field | fix the request |
 
 ```sh
 curl -X POST http://localhost:8080/api/add -d '{
@@ -66,10 +74,12 @@ Remove a pin; its virtual file drops out of the mount.
 
 - By path: `DELETE /api/pins?path=<virtual_path>`
 - By identity: body `{"imdb_id":"tt…","season":1,"episode":4}` (omit season/episode for a movie; matches all pins for that id)
+- By identity + quality: add `"quality":"2160p"` to remove only that resolution tier, leaving the others
 
 ```sh
 curl -X DELETE "http://localhost:8080/api/pins?path=shows/Show%20(2026)/Season%2001/ep.mkv"
 curl -X DELETE http://localhost:8080/api/pins -d '{"imdb_id":"tt38262097","season":1,"episode":4}'
+curl -X DELETE http://localhost:8080/api/pins -d '{"imdb_id":"tt38262097","season":1,"episode":4,"quality":"2160p"}'
 ```
 
 Response: `{"deleted": ["<virtual_path>", ...]}`.

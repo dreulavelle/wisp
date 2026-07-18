@@ -132,11 +132,36 @@ func TestListCountDelete(t *testing.T) {
 		t.Fatalf("count after delete = %d", n)
 	}
 
-	deleted, _ := st.DeleteByMedia(ctx, "tt1", 1, 1)
+	deleted, _ := st.DeleteByMedia(ctx, "tt1", 1, 1, "")
 	if len(deleted) != 1 || deleted[0] != "shows/A/S01/e1.mkv" {
 		t.Fatalf("delete by media = %v", deleted)
 	}
 	if n, _ := st.Count(ctx); n != 1 {
 		t.Fatalf("count after media delete = %d", n)
+	}
+}
+
+func TestDeleteByMediaQualityFilter(t *testing.T) {
+	ctx := context.Background()
+	st := open(t)
+
+	for _, q := range []string{"1080p", "2160p"} {
+		if err := st.Upsert(ctx, Pin{
+			IMDbID: "tt9", MediaType: "movie", Quality: q,
+			VirtualPath: "movies/Film (2026) - [" + q + "].mkv",
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	deleted, err := st.DeleteByMedia(ctx, "tt9", 0, 0, "2160p")
+	if err != nil || len(deleted) != 1 {
+		t.Fatalf("quality-scoped delete = %v (err %v), want one path", deleted, err)
+	}
+	if n, _ := st.Count(ctx); n != 1 {
+		t.Fatalf("count after quality delete = %d, want 1 (1080p kept)", n)
+	}
+	if p, _ := st.ByPath(ctx, "movies/Film (2026) - [1080p].mkv"); p == nil {
+		t.Fatal("1080p pin should remain")
 	}
 }

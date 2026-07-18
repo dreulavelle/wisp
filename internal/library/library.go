@@ -91,6 +91,12 @@ func DetectQuality(s string) string {
 	}
 }
 
+// NormalizeQuality canonicalizes a requested quality label ("4k" → "2160p",
+// "1080P" → "1080p") to the same vocabulary DetectQuality emits, so a request
+// quality and a parsed release resolution compare equal. Returns "" when the
+// label is unrecognized (treated as "no quality constraint").
+func NormalizeQuality(s string) string { return DetectQuality(s) }
+
 // Ext picks a media extension from a release filename, defaulting to .mkv.
 func Ext(filename string) string {
 	filename = strings.ToLower(strings.TrimSpace(filename))

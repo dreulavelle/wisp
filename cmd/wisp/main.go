@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -41,6 +42,9 @@ func main() {
 	defer st.Close()
 
 	aio := aiostreams.New(cfg.AIOStreamsURL, cfg.AIOStreamsPassword)
+	if !aio.HasCredentials() {
+		log.Warn("no AIOStreams credentials derived; auth-required instances will return authentication errors — set WISP_AIOSTREAMS_PASSWORD or use a URL containing the uuid")
+	}
 	app := &app{
 		store: st, aio: aio, log: log, mountPath: cfg.MountPath,
 		webhook:   silowebhook.New(cfg.SiloWebhookURL, cfg.MountPath, log),
@@ -128,7 +132,7 @@ func portOf(addr string) string {
 	return ":8080"
 }
 
-const version = "0.4.0"
+const version = "0.5.0"
 
 type app struct {
 	store     *store.Store
@@ -168,24 +172,13 @@ func (a *app) handleAdd(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sourceURL, size, filename, resolution, err := a.resolve(r.Context(), req.MediaType, req.IMDbID, req.Season, req.Episode)
+	wantQuality := library.NormalizeQuality(req.Quality)
+	sourceURL, size, filename, resolution, err := a.resolve(r.Context(), req.MediaType, req.IMDbID, req.Season, req.Episode, wantQuality)
 	if err != nil {
-		http.Error(w, "no playable stream: "+err.Error(), http.StatusBadGateway)
+		writeAddError(w, a.log, req, err)
 		return
 	}
-	// Label with AIOStreams' own parsed resolution. Fall back to a filename
-	// scan only if it's absent, then the caller's hint, then 1080p. (Silo reads
-	// real metadata regardless — this only names the file.)
-	quality := resolution
-	if quality == "" {
-		quality = library.DetectQuality(filename)
-	}
-	if quality == "" {
-		quality = req.Quality
-	}
-	if quality == "" {
-		quality = "1080p"
-	}
+	quality := qualityLabel(resolution, filename, wantQuality)
 	ids := library.IDs{IMDb: req.IMDbID, TMDb: req.TMDbID, TVDb: req.TVDbID}
 	// If a feeder gave only an IMDb id, enrich TVDB/TMDB ids from Cinemeta so the
 	// folder tag lets the media server match deterministically (Silo/Plex/
@@ -267,17 +260,25 @@ func (a *app) handleDeletePin(w http.ResponseWriter, r *http.Request) {
 		IMDbID  string `json:"imdb_id"`
 		Season  int    `json:"season"`
 		Episode int    `json:"episode"`
+		Quality string `json:"quality"` // optional: delete only this quality tier
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.IMDbID == "" {
 		http.Error(w, "provide ?path= or a JSON body with imdb_id", http.StatusBadRequest)
 		return
 	}
-	deleted, err := a.store.DeleteByMedia(r.Context(), req.IMDbID, req.Season, req.Episode)
+	// An empty quality means "all tiers"; a non-empty one must resolve to a known
+	// tier, or we'd silently widen a targeted delete into a delete-all.
+	quality := library.NormalizeQuality(req.Quality)
+	if strings.TrimSpace(req.Quality) != "" && quality == "" {
+		http.Error(w, "unrecognized quality", http.StatusBadRequest)
+		return
+	}
+	deleted, err := a.store.DeleteByMedia(r.Context(), req.IMDbID, req.Season, req.Episode, quality)
 	if err != nil {
 		http.Error(w, "delete failed", http.StatusInternalServerError)
 		return
 	}
-	a.log.Info("deleted", "imdb", req.IMDbID, "count", len(deleted))
+	a.log.Info("deleted", "imdb", req.IMDbID, "quality", req.Quality, "count", len(deleted))
 	writeJSON(w, map[string]any{"deleted": deleted})
 	for _, path := range deleted {
 		a.webhook.Delete(r.Context(), mediaTypeForPath(path), path)
@@ -353,9 +354,25 @@ func writeJSON(w http.ResponseWriter, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
-// reResolve refreshes a pin whose upstream failed by re-searching AIOStreams.
+// Classified resolve outcomes. These map to distinct API responses in
+// writeAddError so feeders can tell a genuine no-stream condition from a
+// configuration/throttling problem (see aiostreams.SearchError for upstream
+// failures, which propagate through resolve unchanged).
+var (
+	errNoResults      = errors.New("aiostreams returned no results")
+	errNoPlayable     = errors.New("no probeable stream among results")
+	errNoQualityMatch = errors.New("no stream matches the requested quality")
+)
+
+// reResolve refreshes a pin whose upstream failed by re-searching AIOStreams. It
+// keeps the pin's quality tier so a self-heal doesn't swap 4K for 1080p under a
+// file named [2160p]; if that tier has vanished it falls back to the best
+// available so playback still survives.
 func (a *app) reResolve(ctx context.Context, p *store.Pin) error {
-	sourceURL, size, _, _, err := a.resolve(ctx, p.MediaType, p.IMDbID, p.Season, p.Episode)
+	sourceURL, size, _, _, err := a.resolve(ctx, p.MediaType, p.IMDbID, p.Season, p.Episode, library.NormalizeQuality(p.Quality))
+	if errors.Is(err, errNoQualityMatch) {
+		sourceURL, size, _, _, err = a.resolve(ctx, p.MediaType, p.IMDbID, p.Season, p.Episode, "")
+	}
 	if err != nil {
 		return err
 	}
@@ -365,19 +382,99 @@ func (a *app) reResolve(ctx context.Context, p *store.Pin) error {
 
 // resolve picks the highest-ranked stream whose resolver can serve media and
 // report the complete file size. A bad resolver must not hide later results.
-func (a *app) resolve(ctx context.Context, mediaType, imdbID string, season, episode int) (sourceURL string, size int64, filename, resolution string, err error) {
+// When wantQuality is set (canonical form from library.NormalizeQuality), only
+// streams of that resolution are considered, so a caller can pin distinct
+// 1080p/2160p files; an empty wantQuality keeps the best-stream behavior.
+func (a *app) resolve(ctx context.Context, mediaType, imdbID string, season, episode int, wantQuality string) (sourceURL string, size int64, filename, resolution string, err error) {
 	streams, err := a.aio.Search(ctx, mediaType, imdbID, season, episode)
 	if err != nil {
 		return "", 0, "", "", err
 	}
 	if len(streams) == 0 {
-		return "", 0, "", "", fmt.Errorf("no results")
+		return "", 0, "", "", errNoResults
+	}
+	if wantQuality != "" {
+		filtered := filterByResolution(streams, wantQuality)
+		if len(filtered) == 0 {
+			return "", 0, "", "", errNoQualityMatch
+		}
+		streams = filtered
 	}
 	stream, size, err := selectPlayableStream(ctx, streams)
 	if err != nil {
-		return "", 0, "", "", err
+		return "", 0, "", "", errNoPlayable
 	}
 	return stream.URL, size, stream.Filename, stream.Resolution, nil
+}
+
+// qualityLabel picks the quality that names a pinned file (and keys its virtual
+// path). It canonicalizes AIOStreams' parsed resolution ("4K" → "2160p") when
+// recognized, so the label, filterByResolution, and quality-scoped deletion all
+// share one vocabulary; it falls back to the raw resolution, then a filename
+// scan, the requested quality, and finally 1080p. (Silo reads real metadata
+// regardless — this only names the file.)
+func qualityLabel(resolution, filename, want string) string {
+	if norm := library.NormalizeQuality(resolution); norm != "" {
+		return norm
+	}
+	if resolution != "" {
+		return resolution
+	}
+	if q := library.DetectQuality(filename); q != "" {
+		return q
+	}
+	if want != "" {
+		return want
+	}
+	return "1080p"
+}
+
+// filterByResolution keeps only streams whose parsed resolution matches the
+// requested (canonical) quality, preserving AIOStreams' ranking order.
+func filterByResolution(streams []aiostreams.Stream, wantQuality string) []aiostreams.Stream {
+	out := make([]aiostreams.Stream, 0, len(streams))
+	for _, s := range streams {
+		if library.NormalizeQuality(s.Resolution) == wantQuality {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// writeAddError maps a resolve failure to a distinct HTTP status + structured
+// error code. Genuine no-stream cases stay 502 so a feeder keeps the title
+// monitored; auth/rate-limit/transient upstream failures surface as their own
+// codes so a configuration or throttling problem isn't masked as unavailability.
+// The failure is logged without credentials or resolver URLs.
+func writeAddError(w http.ResponseWriter, log *slog.Logger, req addRequest, err error) {
+	// Default to a non-502 upstream fault: only the explicit no-stream sentinels
+	// map to 502, so an unclassified failure (bad URL, decode error, success:false)
+	// surfaces as an error a feeder acts on rather than a monitorable "no stream".
+	status, code, message := http.StatusServiceUnavailable, "upstream_unavailable", "AIOStreams unavailable"
+	var se *aiostreams.SearchError
+	switch {
+	case errors.Is(err, errNoQualityMatch):
+		status, code, message = http.StatusBadGateway, "no_quality_match", "no stream matches the requested quality"
+	case errors.Is(err, errNoResults), errors.Is(err, errNoPlayable):
+		status, code, message = http.StatusBadGateway, "no_streams", err.Error()
+	case errors.As(err, &se):
+		switch se.Kind {
+		case aiostreams.KindAuth:
+			status, code, message = http.StatusInternalServerError, "aiostreams_auth", "AIOStreams authentication failed; check credentials"
+		case aiostreams.KindRateLimited:
+			status, code, message = http.StatusTooManyRequests, "rate_limited", "AIOStreams rate limited; retry later"
+			if se.RetryAfter > 0 {
+				w.Header().Set("Retry-After", strconv.Itoa(int(se.RetryAfter.Seconds())))
+			}
+		default:
+			status, code, message = http.StatusServiceUnavailable, "upstream_unavailable", "AIOStreams temporarily unavailable"
+		}
+	}
+	log.Warn("add failed", "code", code, "media_type", req.MediaType, "imdb", req.IMDbID,
+		"season", req.Season, "episode", req.Episode, "detail", err.Error())
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]any{"error": code, "message": message})
 }
 
 func selectPlayableStream(ctx context.Context, streams []aiostreams.Stream) (aiostreams.Stream, int64, error) {

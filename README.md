@@ -118,9 +118,19 @@ curl -X POST http://localhost:8080/api/add -d '{
 }'
 ```
 
-Add a movie: `"media_type": "movie"`, omit `season`/`episode`. `quality` is
-optional — wisp labels the file with the resolution AIOStreams actually
-returned.
+Add a movie: `"media_type": "movie"`, omit `season`/`episode`.
+
+`quality` is optional. **Omit it** and wisp pins AIOStreams' top-ranked stream
+and labels the file with whatever resolution it returned. **Set it** (`1080p`,
+`2160p`/`4k`, …) and wisp pins a stream *of that resolution* — so you can pin
+`1080p` and `2160p` of the same title as two distinct files. If AIOStreams has
+streams but none at that resolution, the add returns `502 no_quality_match` (a
+retriable "not yet" — the title stays worth re-adding).
+
+Add failures carry a JSON `error` code so a feeder can tell "no stream yet" from
+a misconfiguration: `502 no_streams` / `502 no_quality_match` (keep monitoring),
+`500 aiostreams_auth` (bad credentials), `429 rate_limited` (throttled; honors
+`Retry-After`), `503 upstream_unavailable` (transient).
 
 List pins: `GET /api/pins`. Status: `GET /api/status`.
 
@@ -129,8 +139,10 @@ Remove a title:
 ```sh
 # by virtual path
 curl -X DELETE "http://localhost:8080/api/pins?path=shows/…/ep.mkv"
-# or by identity
+# by identity (all qualities)
 curl -X DELETE http://localhost:8080/api/pins -d '{"imdb_id":"tt38262097","season":1,"episode":4}'
+# by identity, one quality tier only
+curl -X DELETE http://localhost:8080/api/pins -d '{"imdb_id":"tt38262097","season":1,"episode":4,"quality":"2160p"}'
 ```
 
 ## Configuration

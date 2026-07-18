@@ -10,11 +10,72 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
 
 const userAgent = "wisp"
+
+// ErrorKind classifies why a Search call failed so callers can distinguish a
+// genuine no-stream condition from a configuration or throttling problem.
+type ErrorKind int
+
+const (
+	// KindUpstream is an unexpected/unclassified upstream status.
+	KindUpstream ErrorKind = iota
+	// KindAuth is 401/403: missing or wrong credentials.
+	KindAuth
+	// KindRateLimited is 429: throttled; RetryAfter may be set.
+	KindRateLimited
+	// KindTransient is a 5xx or a transport failure; retry later.
+	KindTransient
+)
+
+// SearchError is a classified failure from the AIOStreams Search API. It carries
+// no credentials or resolver URLs, so it is safe to log and return to callers.
+type SearchError struct {
+	Kind       ErrorKind
+	Status     int           // upstream HTTP status; 0 for transport failures
+	RetryAfter time.Duration // parsed from Retry-After on 429, else 0
+	cause      error         // transport error, if any (no credentials/URLs)
+}
+
+func (e *SearchError) Error() string {
+	switch e.Kind {
+	case KindAuth:
+		return fmt.Sprintf("aiostreams authentication failed (HTTP %d)", e.Status)
+	case KindRateLimited:
+		return fmt.Sprintf("aiostreams rate limited (HTTP %d)", e.Status)
+	case KindTransient:
+		if e.Status == 0 {
+			return fmt.Sprintf("aiostreams unreachable: %v", e.cause)
+		}
+		return fmt.Sprintf("aiostreams temporarily unavailable (HTTP %d)", e.Status)
+	default:
+		return fmt.Sprintf("aiostreams search returned HTTP %d", e.Status)
+	}
+}
+
+func (e *SearchError) Unwrap() error { return e.cause }
+
+// parseRetryAfter reads a Retry-After header in either delta-seconds or
+// HTTP-date form, returning 0 when absent or unparseable.
+func parseRetryAfter(v string) time.Duration {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return 0
+	}
+	if secs, err := strconv.Atoi(v); err == nil && secs >= 0 {
+		return time.Duration(secs) * time.Second
+	}
+	if t, err := http.ParseTime(v); err == nil {
+		if d := time.Until(t); d > 0 {
+			return d
+		}
+	}
+	return 0
+}
 
 // Client is a thin AIOStreams REST client.
 type Client struct {
@@ -110,11 +171,20 @@ func (c *Client) Search(ctx context.Context, mediaType, imdbID string, season, e
 	c.applyAuth(req)
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, &SearchError{Kind: KindTransient, cause: err}
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("search returned HTTP %d", resp.StatusCode)
+		switch {
+		case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
+			return nil, &SearchError{Kind: KindAuth, Status: resp.StatusCode}
+		case resp.StatusCode == http.StatusTooManyRequests:
+			return nil, &SearchError{Kind: KindRateLimited, Status: resp.StatusCode, RetryAfter: parseRetryAfter(resp.Header.Get("Retry-After"))}
+		case resp.StatusCode >= 500:
+			return nil, &SearchError{Kind: KindTransient, Status: resp.StatusCode}
+		default:
+			return nil, &SearchError{Kind: KindUpstream, Status: resp.StatusCode}
+		}
 	}
 	var payload searchResponse
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 16<<20)).Decode(&payload); err != nil {
@@ -131,6 +201,13 @@ func (c *Client) Search(ctx context.Context, mediaType, imdbID string, season, e
 		streams = append(streams, Stream{URL: r.URL, Filename: filenameFromResult(r), Resolution: r.ParsedFile.Resolution})
 	}
 	return streams, nil
+}
+
+// HasCredentials reports whether a usable "uuid:password" auth pair was derived.
+// A uuid-only value (no password) cannot authenticate the Search API, so this
+// lets the process warn at startup instead of failing every add with a 401.
+func (c *Client) HasCredentials() bool {
+	return strings.Contains(c.basicCreds, ":")
 }
 
 func (c *Client) applyAuth(req *http.Request) {
