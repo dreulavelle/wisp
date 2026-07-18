@@ -26,7 +26,7 @@ transcode, and seeking all work.
 ## Quick start
 
 wisp embeds rclone and self-mounts the library — one container, no separate
-rclone process. Your media server reads the same mount. This is the whole stack:
+rclone process:
 
 ```yaml
 services:
@@ -48,28 +48,28 @@ services:
       - apparmor:unconfined
     ports:
       - "8080:8080"
-
-  # Your media server — Silo, Plex, Jellyfin, Emby. Bind the mount :rslave so it
-  # sees wisp's FUSE mount, and re-sees it if wisp restarts.
-  media-server:
-    image: your/media-server
-    depends_on: [wisp]
-    volumes:
-      - /mnt/wisp:/mnt/wisp:ro,rslave
 ```
 
 Prepare the host mountpoint once, so the in-container FUSE mount propagates out
-to the host and into the media-server container:
+to the host (and into your media-server container):
 
 ```sh
 mkdir -p /mnt/wisp
 mount --bind /mnt/wisp /mnt/wisp && mount --make-rshared /mnt/wisp
 ```
 
-Point the media server's library at `/mnt/wisp`, feed wisp a title (see
-[API](#api)), and it appears as a real file ready to scan and play. See
-[Deployment](docs/Deployment.md) for propagation details and making the
-host-share survive reboots.
+Then point your media server (Silo, Plex, Jellyfin, Emby — however you already
+run it) at `/mnt/wisp`. If it runs in its own container, give it the mount with
+`:ro,rslave` so it sees wisp's FUSE mount and re-sees it after a wisp restart:
+
+```yaml
+    volumes:
+      - /mnt/wisp:/mnt/wisp:ro,rslave
+```
+
+Feed wisp a title (see [API](#api)) and it appears as a real file ready to scan
+and play. See [Deployment](docs/Deployment.md) for propagation details and making
+the host-share survive reboots.
 
 `rm` on a mounted media file unpins it from wisp; creating, editing, and
 renaming mounted files stay read-only by design.
