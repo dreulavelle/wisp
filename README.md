@@ -94,29 +94,67 @@ renaming mounted files stay read-only by design.
 > `cap_add`, `security_opt`, and the `:rshared` volume) to serve the library
 > over HTTP on `:8080` and mount it yourself with rclone.
 
-## Instant Silo Autoscan
+## Notifying your media server
+
+When wisp pins, renames, or deletes a file it tells your media server to rescan,
+so new content appears instantly instead of on the next periodic scan. Configure
+any combination of targets — wisp notifies all of them. Every target resolves
+paths against `WISP_MOUNT_PATH` (default `/mnt/wisp`), the path your media server
+sees on disk. Delivery is fire-and-forget on a background goroutine: a slow or
+unreachable server never blocks or fails a pin or delete, and each target logs
+its own failures.
+
+All targets fire on three events:
+
+- **Import** — a newly pinned movie or episode.
+- **Rename** — a re-resolve changed the virtual filename (old path removed, new
+  path scanned).
+- **File Delete** — a pin removed via the API or a mounted `rm`.
+
+### Silo (recommended)
 
 Create one ARR-compatible webhook source in **Silo → Autoscan → Sources**, copy
 its webhook URL, and add it to wisp:
 
 ```yaml
 environment:
-  WISP_SILO_WEBHOOK_URL: https://silo.example.com/api/v1/autoscan/webhooks/<secret>
+  WISP_NOTIFY_ARR_WEBHOOK_URL: https://silo.example.com/api/v1/autoscan/webhooks/<secret>
 ```
 
-That is the only webhook setting. wisp automatically uses
-`WISP_MOUNT_PATH` (default `/mnt/wisp`) when sending paths and notifies Silo
-for:
+`WISP_SILO_WEBHOOK_URL` is still accepted as a deprecated alias (if both are set,
+the canonical `WISP_NOTIFY_ARR_WEBHOOK_URL` wins). This is the same Sonarr/Radarr
+webhook shape, so it also drives a real Sonarr/Radarr instance.
 
-- **Import** — immediately scans a newly pinned movie or episode.
-- **Rename** — removes the previous path and scans the replacement when a
-  re-resolve changes the virtual filename.
-- **File Delete** — removes a deleted pin from Silo's library (via the API or a
-  mounted `rm`).
+### Jellyfin / Emby
 
-Webhook failures never prevent a pin or delete. Keep the AIOStreams plugin's
-Wisp Pins polling source enabled as a recovery path. Treat the webhook URL as a
-password: do not publish it in screenshots or logs, and rotate it if exposed.
+wisp posts a `Library/Media/Updated` rescan hint using an admin API key. Silo's
+Jellyfin-compatible endpoint works here too.
+
+```yaml
+environment:
+  WISP_NOTIFY_JELLYFIN_URL: http://jellyfin:8096
+  WISP_NOTIFY_JELLYFIN_API_KEY: <api-key>
+  # Emby is the same protocol under /emby:
+  WISP_NOTIFY_EMBY_URL: http://emby:8096
+  WISP_NOTIFY_EMBY_API_KEY: <api-key>
+```
+
+### Plex
+
+wisp discovers your library sections (cached for 5 minutes) and issues a partial
+scan of just the folder that changed, in the section whose library path contains
+it.
+
+```yaml
+environment:
+  WISP_NOTIFY_PLEX_URL: http://plex:32400
+  WISP_NOTIFY_PLEX_TOKEN: <x-plex-token>
+```
+
+Notification failures never prevent a pin or delete. Keep the AIOStreams plugin's
+Wisp Pins polling source enabled as a recovery path. Treat webhook URLs and
+tokens as passwords: do not publish them in screenshots or logs, and rotate them
+if exposed.
 
 ## API
 
@@ -212,6 +250,20 @@ curl -X DELETE "http://localhost:8080/api/monitors?key=series:tt38262097"
 curl -X POST http://localhost:8080/api/monitors/refresh      # re-check now
 ```
 
+Inspect the scheduler's plan with `GET /api/schedule`:
+
+```sh
+curl http://localhost:8080/api/schedule
+```
+
+It returns `interval_seconds` (the fallback re-check ceiling), `next_wake` (unix
+time the loop next fires), and an `items` array. Each item carries its `key`,
+`media_type`, `title`, `state` (`waiting` for a future release/airstamp,
+`pending` when due, `completed`, or `paused`), `next_check`, `next_release` (the
+next known release/airstamp, when waiting), `last_checked`, `last_error`,
+requested `qualities`/`seasons`, how many files are `pinned`, and
+`pending_targets` (requested quality tiers with nothing pinned yet).
+
 ## Configuration
 
 | Env | Default | Notes |
@@ -226,7 +278,11 @@ curl -X POST http://localhost:8080/api/monitors/refresh      # re-check now
 | `WISP_SCHEDULE_INTERVAL` | `2h` | Monitor re-check ceiling (it wakes near the next airstamp regardless) |
 | `WISP_TMDB_API_KEY` | — | TMDB v3 key or v4 token — enables home-media release gating for movies |
 | `WISP_TMDB_MARKETS` | `US,CA,GB,AU,DE,FR,IT,ES,JP,IN` | Regions whose digital/physical dates release a movie |
-| `WISP_SILO_WEBHOOK_URL` | — | Optional Silo Autoscan webhook for instant import, rename, and delete updates |
+| `WISP_NOTIFY_ARR_WEBHOOK_URL` | — | ARR-compatible Autoscan webhook (Silo/Sonarr/Radarr) for instant import, rename, and delete updates |
+| `WISP_SILO_WEBHOOK_URL` | — | Deprecated alias for `WISP_NOTIFY_ARR_WEBHOOK_URL` (canonical wins if both set) |
+| `WISP_NOTIFY_JELLYFIN_URL` / `_API_KEY` | — | Jellyfin (or Silo Jellyfin-compat) base URL + admin API key; rescans via `Library/Media/Updated` |
+| `WISP_NOTIFY_EMBY_URL` / `_API_KEY` | — | Emby base URL + API key (same protocol, routed under `/emby`) |
+| `WISP_NOTIFY_PLEX_URL` / `WISP_NOTIFY_PLEX_TOKEN` | — | Plex base URL + `X-Plex-Token`; partial-scans the changed folder |
 | `WISP_MOUNT_ALLOW_OTHER` | `true` | Let other UIDs read the mount |
 | `WISP_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, or `error` |
 | `WISP_READ_CHUNK_SIZE` | `32M` | Initial VFS read chunk (smaller = less debrid over-fetch on seeks) |
