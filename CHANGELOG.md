@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.7.0](https://github.com/dreulavelle/wisp/compare/v0.6.0...v0.7.0) (2026-07-18)
+
+
+### Features
+
+* ship compose.yaml with .env support ([2b4f986](https://github.com/dreulavelle/wisp/commit/2b4f986847a10ce012dba0d80a9d8f58802bffef))
+
+
+### Documentation
+
+* add .env.example with all configuration variables ([6b1fe9e](https://github.com/dreulavelle/wisp/commit/6b1fe9e295d02d2b2a40b8122dc124753793ead9))
+* show the exact Seerr webhook URL, events, and JSON payload ([cd53641](https://github.com/dreulavelle/wisp/commit/cd536419b50105349bf02dfff649bc9595cd77c7))
+
 ## [0.6.0](https://github.com/dreulavelle/wisp/compare/v0.5.1...v0.6.0) (2026-07-18)
 
 
