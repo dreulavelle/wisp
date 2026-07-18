@@ -175,16 +175,7 @@ func (c *Client) Search(ctx context.Context, mediaType, imdbID string, season, e
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		switch {
-		case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
-			return nil, &SearchError{Kind: KindAuth, Status: resp.StatusCode}
-		case resp.StatusCode == http.StatusTooManyRequests:
-			return nil, &SearchError{Kind: KindRateLimited, Status: resp.StatusCode, RetryAfter: parseRetryAfter(resp.Header.Get("Retry-After"))}
-		case resp.StatusCode >= 500:
-			return nil, &SearchError{Kind: KindTransient, Status: resp.StatusCode}
-		default:
-			return nil, &SearchError{Kind: KindUpstream, Status: resp.StatusCode}
-		}
+		return nil, classifyFailure(resp)
 	}
 	var payload searchResponse
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 16<<20)).Decode(&payload); err != nil {
@@ -201,6 +192,33 @@ func (c *Client) Search(ctx context.Context, mediaType, imdbID string, season, e
 		streams = append(streams, Stream{URL: r.URL, Filename: filenameFromResult(r), Resolution: r.ParsedFile.Resolution})
 	}
 	return streams, nil
+}
+
+// classifyFailure maps a non-200 Search response to a typed SearchError. It
+// reads AIOStreams' structured error envelope because AIOStreams reports bad
+// credentials as HTTP 400 with error.code "USER_INVALID_DETAILS" (not 401), so
+// status alone would misclassify a permanent auth failure as transient.
+func classifyFailure(resp *http.Response) *SearchError {
+	var body struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	_ = json.NewDecoder(io.LimitReader(resp.Body, 8<<10)).Decode(&body)
+	switch strings.ToUpper(strings.TrimSpace(body.Error.Code)) {
+	case "USER_INVALID_DETAILS", "UNAUTHORIZED", "FORBIDDEN":
+		return &SearchError{Kind: KindAuth, Status: resp.StatusCode}
+	}
+	switch {
+	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
+		return &SearchError{Kind: KindAuth, Status: resp.StatusCode}
+	case resp.StatusCode == http.StatusTooManyRequests:
+		return &SearchError{Kind: KindRateLimited, Status: resp.StatusCode, RetryAfter: parseRetryAfter(resp.Header.Get("Retry-After"))}
+	case resp.StatusCode >= 500:
+		return &SearchError{Kind: KindTransient, Status: resp.StatusCode}
+	default:
+		return &SearchError{Kind: KindUpstream, Status: resp.StatusCode}
+	}
 }
 
 // HasCredentials reports whether a usable "uuid:password" auth pair was derived.

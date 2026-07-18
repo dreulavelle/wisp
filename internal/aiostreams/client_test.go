@@ -146,3 +146,20 @@ func TestHasCredentials(t *testing.T) {
 		t.Fatal("uuid without password cannot authenticate")
 	}
 }
+
+// AIOStreams reports bad credentials as HTTP 400 with a structured error code,
+// not 401 — that must still classify as auth, not a transient upstream fault.
+func TestSearchClassifiesInvalidCredentials400(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`{"success":false,"error":{"code":"USER_INVALID_DETAILS","message":"Invalid UUID or password"}}`))
+	}))
+	defer server.Close()
+
+	c := New(server.URL+"/stremio/uuid-1/blob/manifest.json", "wrong")
+	_, err := c.Search(context.Background(), "movie", "tt1", 0, 0)
+	var se *SearchError
+	if !errors.As(err, &se) || se.Kind != KindAuth {
+		t.Fatalf("error = %v, want KindAuth for USER_INVALID_DETAILS", err)
+	}
+}
