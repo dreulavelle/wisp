@@ -264,12 +264,21 @@ curl http://localhost:8080/api/schedule
 ```
 
 It returns `interval_seconds` (the fallback re-check ceiling), `next_wake` (unix
-time the loop next fires), and an `items` array. Each item carries its `key`,
-`media_type`, `title`, `state` (`waiting` for a future release/airstamp,
-`pending` when due, `completed`, or `paused`), `next_check`, `next_release` (the
-next known release/airstamp, when waiting), `last_checked`, `last_error`,
+time the scheduler's sleep timer is set to fire), and an `items` array. Each item
+carries its `key`, `media_type`, `title`, `state`, `next_check` (its scheduled
+re-check time; omitted once complete), `next_release` (the next known
+release/airstamp, present only when `waiting`), `last_checked`, `last_error`,
 requested `qualities`/`seasons`, how many files are `pinned`, and
 `pending_targets` (requested quality tiers with nothing pinned yet).
+
+`state` is one of:
+
+- **waiting** — nothing due until a real future release date or airstamp.
+- **retrying** — due again later only as a retry (no stream found yet, a
+  metadata error, or no known upcoming episode).
+- **pending** — due now; the next scheduler pass will try to pin it.
+- **completed** — a movie whose every requested tier is pinned (kept as history).
+- **paused** — monitoring disabled for this item.
 
 ## Configuration
 

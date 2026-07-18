@@ -27,7 +27,7 @@ type scheduleItem struct {
 	State          string   `json:"state"`
 	Enabled        bool     `json:"enabled"`
 	Completed      bool     `json:"completed"`
-	NextCheck      int64    `json:"next_check"`
+	NextCheck      *int64   `json:"next_check,omitempty"`
 	NextRelease    *int64   `json:"next_release,omitempty"`
 	LastChecked    *int64   `json:"last_checked,omitempty"`
 	LastError      string   `json:"last_error,omitempty"`
@@ -56,7 +56,12 @@ func (a *app) buildSchedule(ctx context.Context) (scheduleResponse, error) {
 	}
 	now := time.Now()
 	interval := a.mon.Interval()
-	nextWake := now.Add(interval)
+	// Report the scheduler's real armed deadline, not a reconstruction. Before the
+	// first pass arms a timer (e.g. right at startup), fall back to the ceiling.
+	nextWake := a.mon.NextWake()
+	if nextWake.IsZero() {
+		nextWake = now.Add(interval)
+	}
 
 	out := make([]scheduleItem, 0, len(items))
 	for _, it := range items {
@@ -68,31 +73,27 @@ func (a *app) buildSchedule(ctx context.Context) (scheduleResponse, error) {
 			State:          scheduleState(it, now),
 			Enabled:        it.Enabled,
 			Completed:      it.Completed,
-			NextCheck:      it.DueAt.Unix(),
 			Qualities:      it.Qualities,
 			Seasons:        it.Seasons,
 			LastError:      it.LastError,
 			Pinned:         len(pins),
 			PendingTargets: pendingTargets(it, pins),
 		}
+		if !it.DueAt.IsZero() {
+			ts := it.DueAt.Unix()
+			si.NextCheck = &ts
+		}
 		if !it.LastChecked.IsZero() {
 			ts := it.LastChecked.Unix()
 			si.LastChecked = &ts
 		}
-		// A future due time on an active item is its next known release/airstamp.
-		if it.Enabled && !it.Completed && it.DueAt.After(now) {
+		// next_release is the item's DueAt only when that time actually came from a
+		// release date or airstamp — not a plain retry ceiling.
+		if it.Enabled && !it.Completed && it.DueAt.After(now) && isContentDate(it.DueReason) {
 			ts := it.DueAt.Unix()
 			si.NextRelease = &ts
-			if it.DueAt.Before(nextWake) {
-				nextWake = it.DueAt
-			}
-		} else if it.Enabled && !it.Completed {
-			nextWake = now // an item is due now
 		}
 		out = append(out, si)
-	}
-	if nextWake.Before(now) {
-		nextWake = now
 	}
 	return scheduleResponse{
 		IntervalSeconds: int(interval.Seconds()),
@@ -105,7 +106,9 @@ func (a *app) buildSchedule(ctx context.Context) (scheduleResponse, error) {
 // separately by LastError):
 //   - paused:    monitoring disabled
 //   - completed: a movie whose every requested tier is pinned (kept as history)
-//   - waiting:   nothing due until a future release/airstamp
+//   - waiting:   nothing due until a future release date or airstamp
+//   - retrying:  due in the future, but only as a retry ceiling (no stream yet,
+//     a metadata error, or no known upcoming episode)
 //   - pending:   due now; the next pass will try to pin it
 func scheduleState(it store.Monitored, now time.Time) string {
 	switch {
@@ -114,10 +117,19 @@ func scheduleState(it store.Monitored, now time.Time) string {
 	case it.Completed:
 		return "completed"
 	case it.DueAt.After(now):
-		return "waiting"
+		if isContentDate(it.DueReason) {
+			return "waiting"
+		}
+		return "retrying"
 	default:
 		return "pending"
 	}
+}
+
+// isContentDate reports whether a DueReason marks DueAt as a real content date
+// (a movie release or an episode airstamp) rather than a retry ceiling.
+func isContentDate(reason string) bool {
+	return reason == store.DueReasonRelease || reason == store.DueReasonAirstamp
 }
 
 // pendingTargets counts how many requested quality tiers have nothing pinned
