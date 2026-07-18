@@ -12,6 +12,16 @@ import (
 func TestArrEventsUseARRPayloadsAndMountPath(t *testing.T) {
 	var payloads []map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Silo's Autoscan intake keys on method + these headers, so pin them.
+		if r.Method != http.MethodPost {
+			t.Errorf("method = %s, want POST", r.Method)
+		}
+		if ct := r.Header.Get("Content-Type"); ct != "application/json" {
+			t.Errorf("Content-Type = %q, want application/json", ct)
+		}
+		if ua := r.Header.Get("User-Agent"); ua != "wisp" {
+			t.Errorf("User-Agent = %q, want wisp", ua)
+		}
 		var payload map[string]any
 		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 			t.Fatal(err)
