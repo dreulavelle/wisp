@@ -162,12 +162,28 @@ curl -X DELETE http://localhost:8080/api/pins -d '{"imdb_id":"tt38262097","seaso
 
 ### Requests & monitoring
 
-Point a Seerr webhook at `POST /api/seerr` (Seerr → **Settings → Notifications →
-Webhook**, JSON payload, on *Request Approved* / *Auto-Approved*). On approval
-wisp resolves the movie/series, pins what's aired, and monitors the rest — 4K
-requests become a `[2160p]` file, standard requests `[1080p]`. Set
-`WISP_SEERR_URL`/`WISP_SEERR_API_KEY` so wisp can read the request's seasons and
-4K flag authoritatively.
+In Seerr → **Settings → Notifications → Webhook**, set the **Webhook URL** to
+`http://<wisp-host>:8080/api/seerr`, enable **Request Approved** + **Request
+Automatically Approved**, and use this JSON payload:
+
+```json
+{
+  "notification_type": "{{notification_type}}",
+  "subject": "{{subject}}",
+  "media": {
+    "media_type": "{{media_type}}",
+    "tmdbId": "{{media_tmdbid}}",
+    "tvdbId": "{{media_tvdbid}}",
+    "imdbId": "{{media_imdbid}}"
+  },
+  "request": { "request_id": "{{request_id}}" }
+}
+```
+
+On approval wisp resolves the movie/series, pins what's aired, and monitors the
+rest — 4K requests become a `[2160p]` file, standard requests `[1080p]`. Set
+`WISP_SEERR_URL`/`WISP_SEERR_API_KEY` so wisp reads the request's seasons and 4K
+flag authoritatively from the Seerr API (the webhook alone underspecifies them).
 
 You can also drive monitoring directly (Seerr optional):
 
