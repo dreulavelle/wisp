@@ -45,6 +45,9 @@ func (a *app) handleRequestStatus(w http.ResponseWriter, r *http.Request) {
 	var searchIDs []string
 	if mon != nil {
 		searchIDs = append(searchIDs, monitorSearchID(*mon))
+		if mon.TMDbID != "" && tmdbID == "" {
+			tmdbID = mon.TMDbID // let the monitor's tmdb id find legacy imdb-keyed pins
+		}
 	} else {
 		if imdbID != "" {
 			searchIDs = append(searchIDs, imdbID)
@@ -53,7 +56,7 @@ func (a *app) handleRequestStatus(w http.ResponseWriter, r *http.Request) {
 			searchIDs = append(searchIDs, "tmdb:"+tmdbID)
 		}
 	}
-	pins := a.servablePins(r.Context(), searchIDs)
+	pins := a.servablePins(r.Context(), searchIDs, tmdbID)
 
 	if mon == nil && len(pins) == 0 {
 		http.NotFound(w, r) // not tracked — the caller should (re)submit via /api/add
@@ -82,21 +85,28 @@ func (a *app) findMonitor(ctx context.Context, mediaType, tmdbID, imdbID string)
 	return nil
 }
 
-// servablePins returns the healthy (resolvable) pins across the given search ids.
-func (a *app) servablePins(ctx context.Context, searchIDs []string) []store.Pin {
+// servablePins returns the healthy (resolvable) pins for a title, looked up both
+// by search id (imdb or "tmdb:<id>" slot) and by the persisted bare TMDbID, so
+// legacy/direct pins keyed by imdb are found on a tmdb-only query. Deduped by
+// virtual path.
+func (a *app) servablePins(ctx context.Context, searchIDs []string, tmdbID string) []store.Pin {
 	var out []store.Pin
 	seen := map[string]bool{}
-	for _, id := range searchIDs {
-		pins, err := a.store.PinsByMedia(ctx, id)
-		if err != nil {
-			continue
-		}
+	add := func(pins []store.Pin) {
 		for _, p := range pins {
 			if p.Servable() && !seen[p.VirtualPath] {
 				seen[p.VirtualPath] = true
 				out = append(out, p)
 			}
 		}
+	}
+	for _, id := range searchIDs {
+		if pins, err := a.store.PinsByMedia(ctx, id); err == nil {
+			add(pins)
+		}
+	}
+	if pins, err := a.store.PinsByTMDbID(ctx, tmdbID); err == nil {
+		add(pins)
 	}
 	return out
 }
@@ -162,7 +172,38 @@ func isCompleted(mediaType string, mon *store.Monitored, pins []store.Pin) bool 
 		// confirm every aired episode is present.
 		return mon != nil && !mon.LastChecked.IsZero() && mon.PendingAired == 0
 	}
-	return true // movie: a servable pin is the whole scope
+	// Movie: every requested quality tier must have a servable pin — otherwise a
+	// 1080p pin would report "completed" while a later 2160p request is still
+	// unfulfilled, and the router would stop polling. A legacy direct pin (no
+	// monitor) has no requested-tier list, so any servable pin is the whole scope.
+	if mon == nil {
+		return true
+	}
+	return allTiersPinned(mon.Qualities, pins)
+}
+
+// allTiersPinned reports whether every requested quality tier has a servable
+// pin. An empty request list means "best available" — satisfied by any pin.
+func allTiersPinned(requested []string, pins []store.Pin) bool {
+	present := make(map[string]bool, len(pins))
+	for _, p := range pins {
+		present[library.NormalizeQuality(p.Quality)] = true
+	}
+	want := make([]string, 0, len(requested))
+	for _, q := range requested {
+		if n := library.NormalizeQuality(q); n != "" {
+			want = append(want, n)
+		}
+	}
+	if len(want) == 0 {
+		return len(pins) > 0
+	}
+	for _, q := range want {
+		if !present[q] {
+			return false
+		}
+	}
+	return true
 }
 
 // pinnedQualities returns the sorted, unique quality tiers among the pins.

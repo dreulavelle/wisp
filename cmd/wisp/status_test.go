@@ -67,8 +67,8 @@ func TestHandleAddRequestShapedIntake(t *testing.T) {
 	if len(it.Qualities) != 2 || it.Qualities[0] != "1080p" || it.Qualities[1] != "2160p" {
 		t.Fatalf("qualities = %v, want [1080p 2160p]", it.Qualities)
 	}
-	if it.Category != "shows" { // stub cinemeta → non-anime
-		t.Fatalf("category = %q, want shows", it.Category)
+	if it.Category != "" { // no explicit flag + no pins → deferred to the scheduler
+		t.Fatalf("category = %q, want empty (deferred, no synchronous heuristic)", it.Category)
 	}
 	if n, _ := a.store.Count(context.Background()); n != 0 {
 		t.Fatalf("request-shaped add pinned synchronously: %d pins", n)
@@ -166,6 +166,23 @@ func TestComputeRequestStatus(t *testing.T) {
 			mediaType: "movie", wantState: statusQueued,
 		},
 		{
+			name: "movie multi-tier: only 1080p pinned is queued",
+			mon:  &store.Monitored{MediaType: "movie", LastChecked: now, Qualities: []string{"1080p", "2160p"}},
+			pins: []store.Pin{
+				{MediaType: "movie", Quality: "1080p", VirtualPath: "movies/a", SourceURL: "http://a", Size: 1},
+			},
+			mediaType: "movie", wantState: statusQueued,
+		},
+		{
+			name: "movie multi-tier: both tiers pinned is completed",
+			mon:  &store.Monitored{MediaType: "movie", LastChecked: now, Qualities: []string{"1080p", "2160p"}},
+			pins: []store.Pin{
+				{MediaType: "movie", Quality: "1080p", VirtualPath: "movies/a", SourceURL: "http://a", Size: 1},
+				{MediaType: "movie", Quality: "2160p", VirtualPath: "movies/b", SourceURL: "http://a", Size: 1},
+			},
+			mediaType: "movie", wantState: statusCompleted,
+		},
+		{
 			name:      "series unaired (checked, no pins) is queued",
 			mon:       &store.Monitored{MediaType: "series", LastChecked: now, PendingAired: 0, DueAt: future, DueReason: store.DueReasonAirstamp},
 			mediaType: "series", wantState: statusQueued, wantDetail: "awaiting next episode airing",
@@ -239,5 +256,125 @@ func TestHandleRequestStatusHTTP(t *testing.T) {
 	}
 	if resp.RequestRef != "silo-7" {
 		t.Fatalf("request_ref = %q", resp.RequestRef)
+	}
+}
+
+// isRequestShaped: the presence of the qualities field (even empty), request_ref,
+// is_anime, or a tmdb-only identity marks a request; a legacy imdb + season/
+// episode/quality payload does not.
+func TestIsRequestShaped(t *testing.T) {
+	empty := []qualitySpec{}
+	oneTier := []qualitySpec{{ID: "1080p"}}
+	cases := []struct {
+		name string
+		req  addRequest
+		want bool
+	}{
+		{"legacy imdb direct pin", addRequest{IMDbID: "tt1", Season: 1, Episode: 2, Quality: "1080p"}, false},
+		{"legacy imdb movie", addRequest{IMDbID: "tt1"}, false},
+		{"empty qualities array present", addRequest{IMDbID: "tt1", Qualities: &empty}, true},
+		{"non-empty qualities", addRequest{IMDbID: "tt1", Qualities: &oneTier}, true},
+		{"request_ref", addRequest{IMDbID: "tt1", RequestRef: "silo-1"}, true},
+		{"is_anime", addRequest{IMDbID: "tt1", IsAnime: boolPtr(false)}, true},
+		{"tmdb only", addRequest{TMDbID: "603"}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.req.isRequestShaped(); got != tc.want {
+				t.Fatalf("isRequestShaped() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func boolPtr(b bool) *bool { return &b }
+
+// A present-but-empty qualities array routes to async intake, NOT the legacy
+// sync path — which for a series with no season/episode would pin a bogus
+// S00E00 file. The aio backend is live, so a wrong legacy route WOULD pin.
+func TestHandleAddEmptyQualitiesRoutesToIntake(t *testing.T) {
+	backend := wispTestBackend(t)
+	defer backend.Close()
+	a := offlineApp(t)
+	a.aio = aiostreams.New(backend.URL+"/stremio/uuid/blob/manifest.json", "pw")
+
+	body := `{"media_type":"series","imdb_id":"tt9","title":"Show","qualities":[]}`
+	rec := httptest.NewRecorder()
+	a.handleAdd(rec, httptest.NewRequest(http.MethodPost, "/api/add", strings.NewReader(body)))
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202 (empty qualities = request-shaped)", rec.Code)
+	}
+	if items, _ := a.store.ListMonitored(context.Background()); len(items) != 1 {
+		t.Fatalf("monitors = %d, want 1", len(items))
+	}
+	if n, _ := a.store.Count(context.Background()); n != 0 {
+		t.Fatalf("pinned synchronously: %d pins (S00E00 regression)", n)
+	}
+}
+
+// A tmdb-only status query finds a legacy/direct pin that is imdb-keyed but
+// carries a persisted TMDbID (fix: match on Pin.TMDbID, not only the
+// "tmdb:<id>" search-id convention).
+func TestHandleRequestStatusMatchesPinByTMDbID(t *testing.T) {
+	a := offlineApp(t)
+	ctx := context.Background()
+	// Legacy direct pin: imdb-keyed, TMDbID persisted, and NO monitor.
+	_ = a.store.Upsert(ctx, store.Pin{
+		MediaType: "movie", IMDbID: "tt6", TMDbID: "603", Quality: "1080p",
+		VirtualPath: "movies/Akira (1988)/a.mkv", SourceURL: "http://a", Size: 10,
+	})
+
+	rec := httptest.NewRecorder()
+	a.handleRequestStatus(rec, httptest.NewRequest(http.MethodGet, "/api/requests/status?media_type=movie&tmdb_id=603", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (pin found by tmdb id, not 404)", rec.Code)
+	}
+	var resp requestStatus
+	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+	if resp.State != statusCompleted {
+		t.Fatalf("state = %q, want completed", resp.State)
+	}
+	if len(resp.PinnedQualities) != 1 || resp.PinnedQualities[0] != "1080p" {
+		t.Fatalf("pinned_qualities = %v", resp.PinnedQualities)
+	}
+}
+
+// The intake path must never block on metadata: /api/add returns 202 fast even
+// when the Cinemeta backend is pathologically slow (the heuristic is deferred to
+// the scheduler).
+func TestIntakeDoesNotBlockOnMetadata(t *testing.T) {
+	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		time.Sleep(3 * time.Second) // far longer than any acceptable add latency
+		w.Write([]byte(`{"meta":{"genres":["Animation"],"country":"Japan"}}`))
+	}))
+	defer slow.Close()
+
+	st, err := store.Open(filepath.Join(t.TempDir(), "wisp.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	log := slog.New(slog.DiscardHandler)
+	a := &app{
+		store: st, log: log, startedAt: time.Now(),
+		meta:    metadata.New("", nil, metadata.WithBaseURLs(slow.URL, slow.URL, slow.URL)),
+		seerr:   seerr.New("", ""),
+		webhook: notify.New(notify.Options{}, log),
+	}
+	a.mon = monitor.New(st, a.meta, a, time.Hour, log)
+
+	// imdb present (no tmdb→imdb lookup), is_anime omitted → the only metadata
+	// call would be the heuristic, which must be deferred.
+	body := `{"media_type":"series","imdb_id":"tt7","title":"Show","qualities":[{"id":"1080p"}]}`
+	start := time.Now()
+	rec := httptest.NewRecorder()
+	a.handleAdd(rec, httptest.NewRequest(http.MethodPost, "/api/add", strings.NewReader(body)))
+	elapsed := time.Since(start)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202", rec.Code)
+	}
+	if elapsed > time.Second {
+		t.Fatalf("intake blocked on metadata: took %v (heuristic must be deferred)", elapsed)
 	}
 }

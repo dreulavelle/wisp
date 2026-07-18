@@ -139,48 +139,57 @@ func (m *Monitor) Intake(ctx context.Context, r Request) error {
 		return fmt.Errorf("movie intake needs an imdb id or a tmdb id with WISP_TMDB_API_KEY set (no way to gate release otherwise)")
 	}
 	key := monitorKey(r.MediaType, r.IMDbID, r.TMDbID)
+	searchID := requestSearchID(r)
 
-	// Decide the category ONCE per title. Read any existing record first (outside
-	// the lock) so we only run the heuristic — a network call — on a genuinely new
-	// title with no explicit flag. The lock section re-reads and re-confirms.
-	existing, _ := m.store.GetMonitored(ctx, key)
+	item := store.Monitored{
+		Key: key, MediaType: r.MediaType,
+		IMDbID: r.IMDbID, TMDbID: r.TMDbID, TVDbID: r.TVDbID, Title: r.Title,
+		Year: r.Year, Qualities: r.Qualities, Seasons: r.Seasons, DueAt: m.now(),
+		Enabled: true, RequestRef: r.RequestRef,
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// Decide the category ONCE per title, using only store reads so /api/add never
+	// blocks on the network (no synchronous heuristic here). Priority, all
+	// first-writer-wins:
+	//   1. an existing monitor's category,
+	//   2. the category any existing pin already implies (legacy/direct pins),
+	//   3. the explicit is_anime flag.
+	// With none of those, the category is left empty and the scheduler resolves it
+	// (via the heuristic) on its first pass, before any pin path is built.
+	cur, _ := m.store.GetMonitored(ctx, item.Key)
 	category := ""
-	if existing != nil {
-		category = existing.Category
+	if cur != nil {
+		category = cur.Category
 	}
 	if category == "" {
-		category = m.decideCategory(ctx, r)
-	} else if r.IsAnime != nil {
-		// First-writer-wins: a later, conflicting explicit flag never moves the
+		category = m.store.CategoryForMedia(ctx, searchID, r.TMDbID)
+	}
+	switch {
+	case category == "" && r.IsAnime != nil:
+		category = library.Root(r.MediaType, *r.IsAnime)
+	case category != "" && r.IsAnime != nil:
+		// A later, conflicting explicit flag never moves an already-categorized
 		// title (its pins already live under the stored root).
 		if want := library.Root(r.MediaType, *r.IsAnime); want != category {
 			m.log.Warn("category conflict; keeping first-intake category",
 				"key", key, "stored", category, "requested", want)
 		}
 	}
+	item.Category = category
 
-	item := store.Monitored{
-		Key: key, MediaType: r.MediaType,
-		IMDbID: r.IMDbID, TMDbID: r.TMDbID, TVDbID: r.TVDbID, Title: r.Title,
-		Year: r.Year, Qualities: r.Qualities, Seasons: r.Seasons, DueAt: m.now(),
-		Enabled: true, Category: category, RequestRef: r.RequestRef,
-	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
 	// A later request for the same title extends the existing monitor (e.g. a new
 	// season, or a 4K request on top of HD) rather than replacing it. A request
 	// that scopes no seasons widens coverage to all seasons. Re-requesting resets
 	// DueAt to now and clears Completed/Failed so the new work is picked up.
-	if cur, _ := m.store.GetMonitored(ctx, item.Key); cur != nil {
+	if cur != nil {
 		item.AddedAt = cur.AddedAt
 		item.Qualities = unionStrings(cur.Qualities, r.Qualities)
 		if len(cur.Seasons) == 0 || len(r.Seasons) == 0 {
 			item.Seasons = nil // one unscoped request means "all seasons"
 		} else {
 			item.Seasons = unionInts(cur.Seasons, r.Seasons)
-		}
-		if cur.Category != "" {
-			item.Category = cur.Category // first-writer-wins under the lock too
 		}
 		if r.RequestRef == "" {
 			item.RequestRef = cur.RequestRef // don't blank an existing ref
@@ -194,19 +203,56 @@ func (m *Monitor) Intake(ctx context.Context, r Request) error {
 	return nil
 }
 
-// decideCategory picks a new title's library root: the explicit is_anime flag
-// wins; absent it, a minimal Cinemeta heuristic runs (imdb-keyed, best-effort);
-// absent any signal it defaults to non-anime. Called only for a title with no
-// stored category.
-func (m *Monitor) decideCategory(ctx context.Context, r Request) string {
-	isAnime := false
-	switch {
-	case r.IsAnime != nil:
-		isAnime = *r.IsAnime
-	case r.IMDbID != "":
-		isAnime = m.meta.AnimeHeuristic(ctx, r.MediaType, r.IMDbID)
+// ensureCategory resolves and persists a deferred category before any pin path
+// is built. It runs on the scheduler (the heuristic here is a network call, kept
+// off the /api/add path), and re-checks existing pins first so a title that
+// gained legacy/direct pins inherits their root rather than re-deciding. Returns
+// the item to process — the freshly-persisted record when a category was set, so
+// persistResult's concurrency check still lines up.
+func (m *Monitor) ensureCategory(ctx context.Context, it store.Monitored) store.Monitored {
+	if it.Category != "" {
+		return it
 	}
-	return library.Root(r.MediaType, isAnime)
+	// Resolve outside the lock (may hit the network); persist under it.
+	category := m.store.CategoryForMedia(ctx, monitoredSearchID(it), it.TMDbID)
+	if category == "" {
+		isAnime := false
+		if it.IMDbID != "" {
+			isAnime = m.meta.AnimeHeuristic(ctx, it.MediaType, it.IMDbID)
+		}
+		category = library.Root(it.MediaType, isAnime)
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	fresh, err := m.store.GetMonitored(ctx, it.Key)
+	if err != nil || fresh == nil {
+		return it // deleted concurrently
+	}
+	if fresh.Category != "" {
+		return *fresh // a concurrent writer won the race — first-writer-wins
+	}
+	fresh.Category = category
+	if e := m.store.PutMonitored(ctx, *fresh); e != nil {
+		m.log.Warn("persist category", "key", fresh.Key, "error", e)
+		return it
+	}
+	updated, _ := m.store.GetMonitored(ctx, it.Key)
+	if updated != nil {
+		return *updated
+	}
+	return it
+}
+
+// requestSearchID is the id a request's pins are keyed under — imdb if known,
+// else "tmdb:<id>" — matching how app.pin stores them.
+func requestSearchID(r Request) string {
+	if r.IMDbID != "" {
+		return r.IMDbID
+	}
+	if r.TMDbID != "" {
+		return "tmdb:" + r.TMDbID
+	}
+	return ""
 }
 
 // Run drives the scheduler until ctx is cancelled.
@@ -274,6 +320,9 @@ func (m *Monitor) checkDue(ctx context.Context) time.Time {
 			}
 			continue // not due yet
 		}
+		// Resolve a deferred category before any pin path is built. This is where
+		// the (network) heuristic runs — never on the /api/add intake path.
+		it = m.ensureCategory(ctx, it)
 		// Process outside the lock (it's network-bound); persistResult then folds
 		// the result into the current record without clobbering a concurrent
 		// Intake or delete.

@@ -294,6 +294,67 @@ func (s *Store) DeleteByMedia(_ context.Context, imdbID string, season, episode 
 	return deleted, err
 }
 
+// CategoryForMedia returns the library root an existing pin for a title already
+// uses — matched by search id (imdb or "tmdb:<id>" slot) or by the persisted
+// bare TMDbID — so a new monitor inherits the title's first-decided root instead
+// of re-deciding it. Returns "" when no pin exists for the title.
+func (s *Store) CategoryForMedia(_ context.Context, searchID, tmdbID string) string {
+	category := ""
+	_ = s.db.View(func(tx *bbolt.Tx) error {
+		return tx.Bucket(pinsBucket).ForEach(func(_, v []byte) error {
+			if category != "" {
+				return nil // first match already found
+			}
+			var p Pin
+			if err := json.Unmarshal(v, &p); err != nil {
+				return err
+			}
+			if !pinMatchesID(p, searchID, tmdbID) {
+				return nil
+			}
+			if c := p.Category; c != "" {
+				category = c
+			} else if root := library.RootOf(p.VirtualPath); root != "" {
+				category = root
+			}
+			return nil
+		})
+	})
+	return category
+}
+
+// PinsByTMDbID returns every pin whose persisted bare TMDbID matches, so a
+// tmdb-only lookup finds imdb-keyed (legacy/direct) pins that the "tmdb:<id>"
+// search-id convention would miss.
+func (s *Store) PinsByTMDbID(_ context.Context, tmdbID string) ([]Pin, error) {
+	if tmdbID == "" {
+		return nil, nil
+	}
+	var pins []Pin
+	err := s.db.View(func(tx *bbolt.Tx) error {
+		return tx.Bucket(pinsBucket).ForEach(func(_, v []byte) error {
+			var p Pin
+			if err := json.Unmarshal(v, &p); err != nil {
+				return err
+			}
+			if p.TMDbID == tmdbID {
+				pins = append(pins, p)
+			}
+			return nil
+		})
+	})
+	return pins, err
+}
+
+// pinMatchesID reports whether a pin belongs to a title identified by a search
+// id (its IMDbID slot, which may hold "tmdb:<id>") or a bare tmdb id.
+func pinMatchesID(p Pin, searchID, tmdbID string) bool {
+	if searchID != "" && p.IMDbID == searchID {
+		return true
+	}
+	return tmdbID != "" && p.TMDbID == tmdbID
+}
+
 // PinsByMedia returns every pin for an IMDb id (all seasons/episodes/qualities),
 // so the monitor can dedupe without re-pinning what already exists.
 func (s *Store) PinsByMedia(_ context.Context, imdbID string) ([]Pin, error) {

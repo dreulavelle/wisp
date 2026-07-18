@@ -207,9 +207,11 @@ type addRequest struct {
 
 	// Request-shaped intake fields: register/update a monitor (the async path the
 	// Silo plugin shim calls). Their presence routes the request to intake.
-	IsAnime    *bool         `json:"is_anime"`
-	Qualities  []qualitySpec `json:"qualities"`
-	RequestRef string        `json:"request_ref"`
+	// Qualities is a pointer so a present-but-empty `"qualities": []` (meaning
+	// "best available") is distinguishable from an absent field.
+	IsAnime    *bool          `json:"is_anime"`
+	Qualities  *[]qualitySpec `json:"qualities"`
+	RequestRef string         `json:"request_ref"`
 }
 
 // qualitySpec is one requested tier in a request-shaped add. id is a resolution
@@ -220,22 +222,27 @@ type qualitySpec struct {
 }
 
 // isRequestShaped reports whether the body uses the request-shaped intake
-// contract (qualities array, request_ref, is_anime, or a tmdb-only identity the
-// legacy synchronous path can't pin) rather than a legacy direct-pin. Existing
+// contract rather than a legacy direct-pin. The presence of the `qualities`
+// field (even as an empty array), `request_ref`, `is_anime`, or a tmdb-only
+// identity the legacy synchronous path can't pin all mark a request. Existing
 // simpler payloads (imdb + season/episode/quality) fall through to the legacy
 // path unchanged.
 func (r addRequest) isRequestShaped() bool {
-	return len(r.Qualities) > 0 || r.RequestRef != "" || r.IsAnime != nil ||
+	return r.Qualities != nil || r.RequestRef != "" || r.IsAnime != nil ||
 		(r.IMDbID == "" && r.TMDbID != "")
 }
 
 // qualities maps the request-shaped tiers to wisp's canonical quality labels,
-// deduped and order-preserving. An unrecognized id falls back to 2160p when its
-// is4k hint is set; otherwise it is dropped.
+// deduped and order-preserving. An absent or empty field yields no tiers ("best
+// available"). An unrecognized id falls back to 2160p when its is4k hint is set;
+// otherwise it is dropped.
 func (r addRequest) qualities() []string {
+	if r.Qualities == nil {
+		return nil
+	}
 	var out []string
 	seen := map[string]bool{}
-	for _, q := range r.Qualities {
+	for _, q := range *r.Qualities {
 		label := library.NormalizeQuality(q.ID)
 		if label == "" && q.Is4K {
 			label = "2160p"

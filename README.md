@@ -54,19 +54,23 @@ install:
 ```
 
 Point Silo at all four (one library per root). A title's category is decided
-**once**, at first intake, and is then permanent — it is stored on the title and
-on every pin, and never re-derived (the root is part of each file's path, so
-moving it would orphan the on-disk files). Re-categorizing an existing title is
-out of scope for now; a conflicting later request keeps the first category and
-logs a warning.
+**once** and is then permanent — it is stored on the title and on every pin, and
+never re-derived (the root is part of each file's path, so moving it would orphan
+the on-disk files). Re-categorizing an existing title is out of scope for now; a
+conflicting later request keeps the first category and logs a warning.
 
-**How anime is decided:**
+**How anime is decided (in order):**
 
-- An explicit `is_anime` flag on the request wins (e.g. from a Silo request).
-- Otherwise a small, conservative heuristic runs against the Cinemeta metadata
-  wisp already fetches: it requires the **Animation** genre **and** a Japanese
-  original language/country. Western animation and any title without a Japanese
-  signal stay non-anime.
+- If the title already has pins, their existing root is inherited (first writer
+  wins — a later flag never splits a title across roots).
+- An explicit `is_anime` flag on the request wins next (e.g. from a Silo
+  request); this is resolved immediately, so `/api/add` never blocks.
+- Otherwise, when the flag is omitted, the category is resolved by the scheduler
+  on its first pass — *before anything is pinned* — using a small, conservative
+  heuristic over the Cinemeta metadata wisp already fetches: it requires the
+  **Animation** genre **and** a Japanese original language/country. Western
+  animation and any title without a Japanese signal stay non-anime. Deferring
+  this off the intake path keeps `/api/add` fast.
 - If no signal is available, the title defaults to non-anime.
 
 ## Quick start
