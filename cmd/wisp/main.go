@@ -76,7 +76,7 @@ func main() {
 			os.Exit(1)
 		}
 		mnt = m
-		app.mounted = true
+		app.mnt = m
 	} else {
 		log.Info("serving HTTP only; mount it with rclone (set WISP_MOUNT_PATH to self-mount)")
 	}
@@ -124,7 +124,7 @@ type app struct {
 	store     *store.Store
 	aio       *aiostreams.Client
 	log       *slog.Logger
-	mounted   bool
+	mnt       *mount.Mount
 	mountPath string
 	startedAt time.Time
 }
@@ -259,7 +259,7 @@ func (a *app) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"version":        version,
 		"uptime_seconds": int(time.Since(a.startedAt).Seconds()),
 		"pins":           count,
-		"mounted":        a.mounted,
+		"mounted":        a.mnt.Healthy(),
 		"mount_path":     a.mountPath,
 	})
 }
