@@ -142,6 +142,37 @@ func TestParsePlexSectionsAndLongestPrefix(t *testing.T) {
 	}
 }
 
+// A section whose location is the filesystem root ("/") must cover every
+// absolute path, and a more specific section must still win over it.
+func TestPlexRootLocationCoversAllPaths(t *testing.T) {
+	sections := []plexSection{
+		{Key: "1", Locations: []string{"/"}},
+		{Key: "2", Locations: []string{"/mnt/wisp/movies"}},
+	}
+	// A path only the root section covers.
+	if key, ok := sectionForPath(sections, "/mnt/wisp/shows/Demo/Season 01"); !ok || key != "1" {
+		t.Fatalf("root coverage = (%q,%v), want (1,true)", key, ok)
+	}
+	// A more specific section still wins over root.
+	if key, ok := sectionForPath(sections, "/mnt/wisp/movies/Inception (2010)"); !ok || key != "2" {
+		t.Fatalf("specific-over-root = (%q,%v), want (2,true)", key, ok)
+	}
+}
+
+func TestPlexRootSectionParsedFromXML(t *testing.T) {
+	body := `<?xml version="1.0"?>
+<MediaContainer>
+  <Directory key="1" title="Everything"><Location path="/"/></Directory>
+</MediaContainer>`
+	sections, err := parsePlexSections([]byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if key, ok := sectionForPath(sections, "/data/movies/Film"); !ok || key != "1" {
+		t.Fatalf("root section from XML = (%q,%v), want (1,true)", key, ok)
+	}
+}
+
 func TestPlexLongestPrefixWinsNestedSections(t *testing.T) {
 	sections := []plexSection{
 		{Key: "1", Locations: []string{"/data"}},

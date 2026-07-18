@@ -217,7 +217,9 @@ func pathHasPrefix(dir, prefix string) bool {
 	dir = strings.TrimRight(dir, "/")
 	prefix = strings.TrimRight(prefix, "/")
 	if prefix == "" {
-		return dir == ""
+		// The location was root ("/"); it covers every absolute path. (Empty
+		// locations are filtered out during parsing, so this only means root.)
+		return true
 	}
 	if dir == prefix {
 		return true
