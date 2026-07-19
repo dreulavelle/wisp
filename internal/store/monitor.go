@@ -20,7 +20,26 @@ const (
 	DueReasonRelease = "release"
 	// DueReasonAirstamp means DueAt is a series' next episode air time.
 	DueReasonAirstamp = "airstamp"
+	// DueReasonTierBackoff means DueAt is driven by a per-quality-tier backoff: the
+	// only remaining unpinned targets are tiers that consistently return "results
+	// exist but not at this resolution" (e.g. a 2160p request for a show with no 4K
+	// rips), so the tight retry cadence is replaced by the tier's NextTry. Like the
+	// other retry reasons it is not a real content date — the schedule API reports
+	// it as "retrying", never "waiting".
+	DueReasonTierBackoff = "tier_backoff"
 )
+
+// TierBackoffState is the per-quality-tier retry backoff for a monitored title. A
+// tier is backed off when every aired unit of the title (each aired episode of a
+// series, or the movie) reports NoQualityMatch for it in a pass — i.e. the
+// resolution is genuinely absent across the whole title, not merely unreleased.
+// Misses is the consecutive-miss streak (drives an exponential schedule); NextTry
+// is the earliest time to re-attempt the tier. wisp never permanently gives up:
+// NextTry is capped (WISP_TIER_BACKOFF_MAX), so a late release is still retried.
+type TierBackoffState struct {
+	Misses  int       `json:"misses"`
+	NextTry time.Time `json:"next_try"`
+}
 
 // Monitored is a title wisp is tracking until it can be pinned: a movie awaiting
 // its home-media release/availability, or an ongoing series whose new episodes
@@ -55,6 +74,13 @@ type Monitored struct {
 	// retries indefinitely, so this is rare by design; it is never set for an
 	// unreleased/unaired title.
 	Failed bool
+
+	// TierBackoff is the per-quality-tier backoff state, keyed by canonical quality
+	// (library.NormalizeQuality, e.g. "2160p"). A tier appears here once it has been
+	// detected absent across the whole title; a successful pin of that tier removes
+	// it. Nil/absent for old records and titles with no requested tiers — zero-value
+	// tolerant. Kept readable (never hidden) so the schedule API can surface it.
+	TierBackoff map[string]TierBackoffState `json:"TierBackoff,omitempty"`
 
 	// Observability / control (kept-and-marked so the monitor list doubles as a
 	// request history — idea from drondeseries's PR #5).

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/dreulavelle/wisp/internal/aiostreams"
+	"github.com/dreulavelle/wisp/internal/monitor"
 	"github.com/dreulavelle/wisp/internal/notify"
 	"github.com/dreulavelle/wisp/internal/store"
 )
@@ -218,21 +219,34 @@ func TestWriteAddErrorStatusMapping(t *testing.T) {
 	}
 }
 
-func TestNoStreamReason(t *testing.T) {
-	// The three benign "nothing to pin yet" sentinels must classify to a non-empty
-	// reason (logged at INFO, retried); anything else must return "" so it
-	// propagates as a real error rather than being silently swallowed.
-	for _, benign := range []error{errNoResults, errNoPlayable, errNoQualityMatch} {
-		if noStreamReason(benign) == "" {
-			t.Errorf("noStreamReason(%v) = \"\", want a reason", benign)
+func TestPinOutcome(t *testing.T) {
+	// Each benign "nothing to pin yet" sentinel must classify to its specific
+	// outcome and a non-empty reason (logged at INFO, retried); anything else must
+	// return reason "" so it propagates as a real error rather than being silently
+	// swallowed.
+	benign := []struct {
+		err  error
+		want monitor.PinOutcome
+	}{
+		{errNoResults, monitor.NoResults},
+		{errNoPlayable, monitor.NotPlayable},
+		{errNoQualityMatch, monitor.NoQualityMatch},
+	}
+	for _, tc := range benign {
+		got, reason := pinOutcome(tc.err)
+		if reason == "" {
+			t.Errorf("pinOutcome(%v) reason = \"\", want a reason", tc.err)
+		}
+		if got != tc.want {
+			t.Errorf("pinOutcome(%v) outcome = %v, want %v", tc.err, got, tc.want)
 		}
 	}
 	for _, fault := range []error{
 		errors.New("store write failed"),
 		&aiostreams.SearchError{Kind: aiostreams.KindAuth, Status: 401},
 	} {
-		if r := noStreamReason(fault); r != "" {
-			t.Errorf("noStreamReason(%v) = %q, want \"\" (real fault must propagate)", fault, r)
+		if _, r := pinOutcome(fault); r != "" {
+			t.Errorf("pinOutcome(%v) reason = %q, want \"\" (real fault must propagate)", fault, r)
 		}
 	}
 }
