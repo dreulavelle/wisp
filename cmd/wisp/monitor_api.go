@@ -11,43 +11,46 @@ import (
 	"github.com/dreulavelle/wisp/internal/monitor"
 )
 
-// Pin implements monitor.Fulfiller: resolve+pin one target. pinned=false means
-// no stream is available yet (the monitor keeps trying); a returned error is a
-// real fault (auth/rate-limit/store) worth surfacing.
-func (a *app) Pin(ctx context.Context, t monitor.Target) (bool, error) {
+// Pin implements monitor.Fulfiller: resolve+pin one target. A non-Pinned outcome
+// means no stream is available yet (the monitor keeps trying, and uses the outcome
+// to tell a transient miss from a resolution that may never appear); a returned
+// error is a real fault (auth/rate-limit/store) worth surfacing.
+func (a *app) Pin(ctx context.Context, t monitor.Target) (monitor.PinOutcome, error) {
 	_, _, err := a.pin(ctx, pinSpec{
 		MediaType: t.MediaType, IMDbID: t.IMDbID, TMDbID: t.TMDbID, TVDbID: t.TVDbID,
 		Title: t.Title, Year: t.Year, Season: t.Season, Episode: t.Episode, Quality: t.Quality,
 		Category: t.Category,
 	})
 	if err == nil {
-		return true, nil
+		return monitor.Pinned, nil
 	}
-	if reason := noStreamReason(err); reason != "" {
-		// Surface WHY nothing pinned, at INFO — otherwise a title that AIOStreams
-		// can't resolve (e.g. a debrid returning no playable links) just sits in
-		// "retrying" with no explanation, which looks like wisp doing nothing.
-		a.log.Info("no stream to pin yet", "reason", reason, "title", t.Title,
-			"media_type", t.MediaType, "imdb", t.IMDbID, "season", t.Season,
-			"episode", t.Episode, "quality", t.Quality)
-		return false, nil // nothing (at this quality) to pin yet
+	outcome, reason := pinOutcome(err)
+	if reason == "" {
+		return outcome, err // genuine fault (outcome ignored while err != nil)
 	}
-	return false, err
+	// Surface WHY nothing pinned, at INFO — otherwise a title that AIOStreams
+	// can't resolve (e.g. a debrid returning no playable links) just sits in
+	// "retrying" with no explanation, which looks like wisp doing nothing.
+	a.log.Info("no stream to pin yet", "reason", reason, "title", t.Title,
+		"media_type", t.MediaType, "imdb", t.IMDbID, "season", t.Season,
+		"episode", t.Episode, "quality", t.Quality)
+	return outcome, nil // nothing (at this quality) to pin yet
 }
 
-// noStreamReason classifies an "unable to pin yet" error for logging. It returns
-// "" when err is a genuine fault (auth/rate-limit/store) that should propagate as
-// an error instead of a benign retry.
-func noStreamReason(err error) string {
+// pinOutcome classifies an "unable to pin yet" error into a monitor.PinOutcome and
+// a human-readable reason for logging. A genuine fault (auth/rate-limit/store)
+// yields reason == "" so the caller propagates it as an error instead of a benign
+// retry; its returned outcome is a placeholder never consumed while err != nil.
+func pinOutcome(err error) (monitor.PinOutcome, string) {
 	switch {
 	case errors.Is(err, errNoResults):
-		return "AIOStreams returned no playable results (check debrid/indexer)"
+		return monitor.NoResults, "AIOStreams returned no playable results (check debrid/indexer)"
 	case errors.Is(err, errNoPlayable):
-		return "results found but none were probeable"
+		return monitor.NotPlayable, "results found but none were probeable"
 	case errors.Is(err, errNoQualityMatch):
-		return "no result at the requested quality"
+		return monitor.NoQualityMatch, "no result at the requested quality"
 	default:
-		return ""
+		return monitor.NoResults, ""
 	}
 }
 

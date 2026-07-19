@@ -33,6 +33,10 @@ const (
 	maxResolveConcurrency     = 16
 )
 
+// defaultTierBackoffMax is the per-tier backoff ceiling used when a non-positive
+// value is supplied — a tier that never materializes is retried at most weekly.
+const defaultTierBackoffMax = 7 * 24 * time.Hour
+
 // PinKey identifies a pinned unit for dedupe. Quality is canonical ("" only for
 // a pin whose resolution was unknown).
 type PinKey struct {
@@ -76,11 +80,33 @@ type Request struct {
 	RequestRef string
 }
 
+// PinOutcome classifies a benign (non-fault) result of trying to pin one target,
+// so the monitor can tell "no stream at all yet" (transient/unreleased) apart from
+// "results exist but not at this resolution" (a tier that may never materialize).
+// A genuine fault (auth/rate-limit/store) is reported via Pin's error instead, and
+// the outcome is ignored while err != nil.
+type PinOutcome int
+
+const (
+	// Pinned means a stream was resolved and pinned.
+	Pinned PinOutcome = iota
+	// NoResults means AIOStreams returned nothing for the unit — transient (an
+	// upstream hiccup) or simply not seedable yet. Never triggers tier backoff.
+	NoResults
+	// NoQualityMatch means results exist for the unit but none at the requested
+	// resolution. This is the signal a tier may be permanently absent.
+	NoQualityMatch
+	// NotPlayable means results were found but none were probeable.
+	NotPlayable
+)
+
 // Fulfiller resolves+pins targets and reports what is already pinned. The app
 // implements it over AIOStreams + the pin store.
 type Fulfiller interface {
-	// Pin resolves and pins one target; pinned=false means "no stream yet".
-	Pin(ctx context.Context, t Target) (pinned bool, err error)
+	// Pin resolves and pins one target. The outcome classifies a benign miss (see
+	// PinOutcome); a non-nil error is a real fault worth surfacing (outcome is then
+	// ignored).
+	Pin(ctx context.Context, t Target) (outcome PinOutcome, err error)
 	// PinnedKeys returns the units already pinned for an IMDb id (for dedupe).
 	PinnedKeys(ctx context.Context, imdbID string) (map[PinKey]bool, error)
 }
@@ -96,8 +122,12 @@ type Monitor struct {
 	// parallel within a pass. It is global (per-title, and titles run one at a
 	// time) so it caps the peak debrid fan-out. Always in [1, maxResolveConcurrency].
 	resolveConcurrency int
-	now                func() time.Time
-	wake               chan struct{}
+	// tierBackoffMax caps the per-quality-tier retry backoff (WISP_TIER_BACKOFF_MAX):
+	// a tier detected absent across the whole title is retried at most once per this
+	// duration, never permanently abandoned. Always > 0 (New defaults it).
+	tierBackoffMax time.Duration
+	now            func() time.Time
+	wake           chan struct{}
 	// nextWakeNano is the unix-nano deadline of the sleep timer the Run loop last
 	// armed, published so the schedule API reports the scheduler's real next wake
 	// rather than a reconstruction. Zero until the first pass arms a timer.
@@ -117,7 +147,7 @@ type Monitor struct {
 // resolveConcurrency bounds per-series episode fan-out per pass; a non-positive
 // value defaults to defaultResolveConcurrency and it is capped at
 // maxResolveConcurrency.
-func New(st *store.Store, meta *metadata.Service, ful Fulfiller, interval time.Duration, resolveConcurrency int, log *slog.Logger) *Monitor {
+func New(st *store.Store, meta *metadata.Service, ful Fulfiller, interval time.Duration, resolveConcurrency int, tierBackoffMax time.Duration, log *slog.Logger) *Monitor {
 	if interval <= 0 {
 		interval = 2 * time.Hour
 	}
@@ -127,9 +157,18 @@ func New(st *store.Store, meta *metadata.Service, ful Fulfiller, interval time.D
 	if resolveConcurrency > maxResolveConcurrency {
 		resolveConcurrency = maxResolveConcurrency
 	}
+	if tierBackoffMax <= 0 {
+		tierBackoffMax = defaultTierBackoffMax
+	}
+	// The cap can never sit below the base cadence, or backoff would run faster than
+	// a normal retry.
+	if tierBackoffMax < interval {
+		tierBackoffMax = interval
+	}
 	return &Monitor{
 		store: st, meta: meta, ful: ful, log: log, interval: interval,
 		resolveConcurrency: resolveConcurrency,
+		tierBackoffMax:     tierBackoffMax,
 		now:                time.Now,
 		wake:               make(chan struct{}, 1),
 	}
@@ -341,6 +380,10 @@ type passResult struct {
 	errMsg       string    // last non-fatal error (surfaced in the API)
 	pendingAired int       // series: aired-but-unpinned episodes this pass (0 = caught up)
 	failed       bool      // permanent give-up (unresolvable identity)
+	// tierBackoff is the per-quality-tier backoff state to persist. It always
+	// carries the intended full map (nil = clear); an early return that does no tier
+	// work passes the snapshot's existing map so persistResult never clobbers it.
+	tierBackoff map[string]store.TierBackoffState
 }
 
 // checkDue processes every due item and returns the earliest next-due time
@@ -407,6 +450,7 @@ func (m *Monitor) persistResult(ctx context.Context, snapshot store.Monitored, r
 		cur.DueAt = res.due
 		cur.DueReason = res.reason
 		cur.Failed = res.failed
+		cur.TierBackoff = res.tierBackoff
 		if snapshot.MediaType == "series" {
 			cur.PendingAired = res.pendingAired
 		} else {
@@ -430,21 +474,34 @@ func (m *Monitor) processMovie(ctx context.Context, it store.Monitored) passResu
 	release, err := m.meta.MovieReleaseDate(ctx, it.IMDbID, it.TMDbID, now)
 	switch {
 	case errors.Is(err, metadata.ErrNoHomeRelease):
-		return passResult{due: now.Add(m.interval), reason: store.DueReasonRetry} // theatrical-only — check again later
+		return passResult{due: now.Add(m.interval), reason: store.DueReasonRetry, tierBackoff: it.TierBackoff} // theatrical-only — check again later
 	case err != nil:
 		m.log.Warn("movie release lookup", "title", it.Title, "error", err)
-		return passResult{due: now.Add(m.interval), reason: store.DueReasonRetry, errMsg: err.Error()}
+		return passResult{due: now.Add(m.interval), reason: store.DueReasonRetry, errMsg: err.Error(), tierBackoff: it.TierBackoff}
 	case release.After(now):
-		return passResult{due: release, reason: store.DueReasonRelease} // wake at the real release date
+		return passResult{due: release, reason: store.DueReasonRelease, tierBackoff: it.TierBackoff} // wake at the real release date
 	}
 	pinned, err := m.ful.PinnedKeys(ctx, monitoredSearchID(it))
 	if err != nil {
 		pinned = map[PinKey]bool{}
 	}
-	if m.pinMissing(ctx, targetsForQualities(it, 0, 0), pinned) == 0 {
-		return passResult{completed: true, reason: store.DueReasonRetry} // fully pinned — done, kept for history
+	unit := m.pinMissing(ctx, targetsForQualities(it, 0, 0), pinned)
+	if unit.remaining == 0 {
+		return passResult{completed: true, reason: store.DueReasonRetry} // fully pinned — done, kept for history (tier backoff cleared)
 	}
-	return passResult{due: now.Add(m.interval), reason: store.DueReasonRetry} // released but no stream yet — retry
+	// One aired unit (the movie); fold its per-tier outcomes into the backoff state.
+	tally := newTierPassTally(1)
+	tally.add(unit)
+	backoff, backedOffRemaining, earliestBackoff := m.foldTierBackoff(it.TierBackoff, tally, now)
+	res := passResult{reason: store.DueReasonRetry, tierBackoff: backoff}
+	if unit.remaining-backedOffRemaining <= 0 && backedOffRemaining > 0 {
+		// Every remaining tier is hard-absent and in backoff — retry on the tier
+		// schedule, not the tight interval.
+		res.due, res.reason = earliestBackoff, store.DueReasonTierBackoff
+	} else {
+		res.due = now.Add(m.interval) // a normal tier still needs the fast cadence
+	}
+	return res
 }
 
 // processSeries pins any aired-but-unpinned episodes and schedules the next wake
@@ -457,10 +514,10 @@ func (m *Monitor) processSeries(ctx context.Context, it store.Monitored) passRes
 			// Permanent identity failure — a series can never be enumerated without
 			// an imdb id, so give up rather than retry forever.
 			m.log.Warn("series enumerate: unresolvable identity", "title", it.Title, "error", err)
-			return passResult{reason: store.DueReasonRetry, errMsg: err.Error(), failed: true}
+			return passResult{reason: store.DueReasonRetry, errMsg: err.Error(), failed: true, tierBackoff: it.TierBackoff}
 		}
 		m.log.Warn("series enumerate", "title", it.Title, "error", err)
-		return passResult{due: now.Add(m.interval), reason: store.DueReasonRetry, errMsg: err.Error()}
+		return passResult{due: now.Add(m.interval), reason: store.DueReasonRetry, errMsg: err.Error(), tierBackoff: it.TierBackoff}
 	}
 	if len(it.Seasons) > 0 {
 		all = filterSeasons(all, it.Seasons) // honor a per-season request
@@ -469,72 +526,217 @@ func (m *Monitor) processSeries(ctx context.Context, it store.Monitored) passRes
 	if err != nil {
 		pinned = map[PinKey]bool{}
 	}
+	// Snapshot the aired episodes so each goroutine writes its own result slot —
+	// no shared mutable aggregate, so the per-tier tally stays race-free.
+	aired := make([]metadata.Episode, 0, len(all))
+	for _, ep := range all {
+		if ep.Aired.IsZero() || ep.Aired.After(now) {
+			continue // not aired yet
+		}
+		aired = append(aired, ep)
+	}
 	// Resolve aired episodes concurrently, bounded by resolveConcurrency. Each
 	// episode is one unit of work touching only its own (season, episode) PinKeys,
 	// so the goroutines share the pinned snapshot read-only (no shared mutable
 	// dedupe map). Quality tiers stay sequential inside pinMissing so the upstream
 	// search cache still collapses a title's tiers into one search.
+	results := make([]unitOutcome, len(aired))
 	var g errgroup.Group
 	g.SetLimit(m.resolveConcurrency)
-	var remaining atomic.Int64
-	for _, ep := range all {
-		if ep.Aired.IsZero() || ep.Aired.After(now) {
-			continue // not aired yet
-		}
+	for i, ep := range aired {
 		g.Go(func() error {
-			// Fold the outcome into an aggregate and always return nil: one
-			// episode's resolver hiccup must never fail-fast the whole season.
-			remaining.Add(int64(m.pinMissing(ctx, targetsForQualities(it, ep.Season, ep.Number), pinned)))
+			// Each worker writes only results[i]; one episode's resolver hiccup must
+			// never fail-fast the season, so always return nil.
+			results[i] = m.pinMissing(ctx, targetsForQualities(it, ep.Season, ep.Number), pinned)
 			return nil
 		})
 	}
 	_ = g.Wait() // workers never error; Wait blocks until the season's episodes finish
-	rem := int(remaining.Load())
+
+	// Fold the per-episode outcomes once, after Wait, into a total remaining count
+	// and a per-tier tally (aired episodes are the "whole unit" for tier backoff).
+	rem := 0
+	tally := newTierPassTally(len(aired))
+	for _, r := range results {
+		rem += r.remaining
+		tally.add(r)
+	}
+	backoff, backedOffRemaining, earliestBackoff := m.foldTierBackoff(it.TierBackoff, tally, now)
+	normalRemaining := rem - backedOffRemaining
+
 	nextAir, hasNext := metadata.NextAir(all, now)
-	// A stream usually lags an episode's air time (minutes to hours). If an aired
-	// episode is still unpinned, retry at the interval — don't defer to the next
-	// airstamp, which could be a week (or a mid-season gap) away.
-	if rem > 0 {
+	res := passResult{pendingAired: rem, tierBackoff: backoff}
+	switch {
+	case normalRemaining > 0:
+		// A stream usually lags an episode's air time (minutes to hours). If an aired
+		// episode is still unpinned for a normal (not hard-absent) tier, retry at the
+		// interval — don't defer to the next airstamp, which could be a week away.
 		retry := now.Add(m.interval)
 		if hasNext && nextAir.Before(retry) {
-			return passResult{due: nextAir, reason: store.DueReasonAirstamp, pendingAired: rem}
+			res.due, res.reason = nextAir, store.DueReasonAirstamp
+		} else {
+			res.due, res.reason = retry, store.DueReasonRetry
 		}
-		return passResult{due: retry, reason: store.DueReasonRetry, pendingAired: rem}
+	case backedOffRemaining > 0:
+		// Every remaining target is a hard-absent tier in backoff. Drive DueAt from
+		// the earliest tier NextTry instead of the tight interval, but still wake at
+		// an upcoming airstamp if it's sooner (a newly aired episode is a cheap,
+		// worthwhile re-check that may finally carry the missing tier).
+		res.due, res.reason = earliestBackoff, store.DueReasonTierBackoff
+		if hasNext && nextAir.Before(res.due) {
+			res.due, res.reason = nextAir, store.DueReasonAirstamp
+		}
+	case hasNext:
+		res.due, res.reason = nextAir, store.DueReasonAirstamp // all aired episodes pinned — wake near the next airing
+	default:
+		res.due, res.reason = now.Add(m.interval), store.DueReasonRetry // no known upcoming episode — check again at the ceiling
 	}
-	if hasNext {
-		return passResult{due: nextAir, reason: store.DueReasonAirstamp} // all aired episodes pinned — wake near the next airing
-	}
-	return passResult{due: now.Add(m.interval), reason: store.DueReasonRetry} // no known upcoming episode — check again at the ceiling
+	return res
 }
 
-// pinMissing pins every target not already pinned, returning how many remain
-// unpinned (0 = fully satisfied). The pinned snapshot is treated as read-only —
-// it may be shared across the concurrent per-episode workers — so pins made
-// within this call are tracked in a local session map for intra-call dedupe
-// (e.g. a default "" tier already satisfied by an earlier tier of the same unit).
-func (m *Monitor) pinMissing(ctx context.Context, targets []Target, pinned map[PinKey]bool) (remaining int) {
+// unitOutcome is pinMissing's result for one unit (a movie, or one episode of a
+// series): how many of its requested tiers remain unpinned after the pass, plus
+// the per-tier outcome for every explicit tier it actually attempted this pass.
+// Tiers already satisfied (dedupe-skipped) are absent from tiers — so a tier is
+// "absent across the whole unit" only when every aired unit reports it here as
+// NoQualityMatch. The default "" (best-available) tier is never tracked: it can't
+// return NoQualityMatch, so it never participates in tier backoff.
+type unitOutcome struct {
+	remaining int
+	tiers     map[string]PinOutcome // canonical quality → outcome (attempted tiers only)
+}
+
+func (u *unitOutcome) record(quality string, outcome PinOutcome) {
+	if quality == "" {
+		return // the best-available tier can't be quality-absent; never backs off
+	}
+	if u.tiers == nil {
+		u.tiers = map[string]PinOutcome{}
+	}
+	u.tiers[quality] = outcome
+}
+
+// pinMissing pins every target not already pinned, reporting how many remain
+// unpinned (0 = fully satisfied) and the per-tier outcome for the caller's tier
+// backoff accounting. The pinned snapshot is treated as read-only — it may be
+// shared across the concurrent per-episode workers — so pins made within this
+// call are tracked in a local session map for intra-call dedupe (e.g. a default
+// "" tier already satisfied by an earlier tier of the same unit).
+func (m *Monitor) pinMissing(ctx context.Context, targets []Target, pinned map[PinKey]bool) unitOutcome {
+	var out unitOutcome
 	var session map[PinKey]bool // pins made in this call; lazily allocated
 	for _, t := range targets {
+		q := library.NormalizeQuality(t.Quality)
 		if isPinned(pinned, t.Season, t.Episode, t.Quality) || isPinned(session, t.Season, t.Episode, t.Quality) {
 			continue
 		}
-		ok, err := m.ful.Pin(ctx, t)
+		outcome, err := m.ful.Pin(ctx, t)
 		if err != nil {
 			m.log.Warn("monitor pin", "title", t.Title, "season", t.Season, "episode", t.Episode, "error", err)
-			remaining++
+			out.remaining++
+			out.record(q, NoResults) // a fault is not a quality signal — never accrues tier backoff
 			continue
 		}
-		if !ok {
-			remaining++ // no stream yet
+		if outcome != Pinned {
+			out.remaining++ // no stream (or none at this tier) yet
+			out.record(q, outcome)
 			continue
 		}
 		if session == nil {
 			session = make(map[PinKey]bool, len(targets))
 		}
-		session[PinKey{t.Season, t.Episode, library.NormalizeQuality(t.Quality)}] = true
+		session[PinKey{t.Season, t.Episode, q}] = true
+		out.record(q, Pinned)
 		m.log.Info("pinned", "title", t.Title, "season", t.Season, "episode", t.Episode, "quality", t.Quality)
 	}
-	return remaining
+	return out
+}
+
+// tierPassTally aggregates, across the aired units of one title in a single pass,
+// how each explicit quality tier resolved. It decides per-tier backoff: a tier is
+// "absent across the whole title" only when every aired unit reported
+// NoQualityMatch for it (none pinned, none transient, none already satisfied).
+// airedUnits is the denominator (aired episodes, or 1 for a movie).
+type tierPassTally struct {
+	airedUnits int
+	nqm        map[string]int  // canonical quality → NoQualityMatch count this pass
+	pinnedNow  map[string]bool // canonical quality → pinned at least once this pass
+}
+
+func newTierPassTally(airedUnits int) tierPassTally {
+	return tierPassTally{airedUnits: airedUnits, nqm: map[string]int{}, pinnedNow: map[string]bool{}}
+}
+
+// add folds one unit's per-tier outcomes into the tally. Transient outcomes
+// (NoResults/NotPlayable) are deliberately not counted: they neither accrue a miss
+// nor reset a tier, so an upstream hiccup can't undo an existing backoff streak.
+func (t *tierPassTally) add(u unitOutcome) {
+	for q, outcome := range u.tiers {
+		switch outcome {
+		case Pinned:
+			t.pinnedNow[q] = true
+		case NoQualityMatch:
+			t.nqm[q]++
+		}
+	}
+}
+
+// foldTierBackoff derives the next per-tier backoff map from the snapshot's
+// existing state and this pass's tally. A tier pinned this pass is reset (removed);
+// a tier reported NoQualityMatch by every aired unit accrues one miss and is
+// re-scheduled on the exponential (capped) schedule; all other tiers carry forward
+// unchanged. It also returns how many of the pass's remaining targets belong to
+// backed-off tiers (every aired unit lacks such a tier → one target each) and the
+// earliest tier NextTry, so the caller can drive DueAt from the tier schedule.
+func (m *Monitor) foldTierBackoff(existing map[string]store.TierBackoffState, tally tierPassTally, now time.Time) (next map[string]store.TierBackoffState, backedOffRemaining int, earliest time.Time) {
+	next = make(map[string]store.TierBackoffState, len(existing))
+	for q, st := range existing {
+		next[q] = st
+	}
+	for q := range tally.pinnedNow {
+		delete(next, q) // any successful pin of a tier resets it
+	}
+	for q, cnt := range tally.nqm {
+		if tally.pinnedNow[q] {
+			continue // a fresh pin of the same tier this pass wins over its misses
+		}
+		if tally.airedUnits == 0 || cnt != tally.airedUnits {
+			continue // not unanimously absent → transient/partial, not a hard backoff
+		}
+		misses := next[q].Misses + 1
+		nt := now.Add(m.tierBackoffDelay(misses))
+		next[q] = store.TierBackoffState{Misses: misses, NextTry: nt}
+		backedOffRemaining += cnt // every aired unit lacks this tier → cnt remaining targets
+		if earliest.IsZero() || nt.Before(earliest) {
+			earliest = nt
+		}
+	}
+	if len(next) == 0 {
+		next = nil
+	}
+	return next, backedOffRemaining, earliest
+}
+
+// tierBackoffDelay is the wait before re-attempting a tier with the given
+// consecutive-miss streak: an exponential ramp from the base interval (interval,
+// 2×, 4×, …) capped at tierBackoffMax. The cap means a tier that never
+// materializes is retried at most once per tierBackoffMax — hard backoff, never a
+// permanent give-up. Doubling stops at the cap, so the duration never overflows.
+func (m *Monitor) tierBackoffDelay(misses int) time.Duration {
+	if misses < 1 {
+		misses = 1
+	}
+	d := m.interval
+	for i := 1; i < misses; i++ {
+		if d >= m.tierBackoffMax {
+			return m.tierBackoffMax
+		}
+		d *= 2
+	}
+	if d > m.tierBackoffMax {
+		return m.tierBackoffMax
+	}
+	return d
 }
 
 // isPinned reports whether a unit is already pinned. A specific quality matches
