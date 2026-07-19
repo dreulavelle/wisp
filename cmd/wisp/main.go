@@ -78,7 +78,8 @@ func main() {
 			Window:      cfg.ProbeWindow,
 			Timeout:     cfg.ProbeTimeout,
 		}, log),
-		startedAt: time.Now(),
+		startedAt:      time.Now(),
+		lazyResolution: cfg.LazyResolution,
 	}
 	log.Info("probe limits", "concurrency", cfg.ProbeConcurrency, "window", cfg.ProbeWindow, "timeout", cfg.ProbeTimeout)
 	app.mon = monitor.New(st, app.meta, app, cfg.ScheduleInterval, cfg.ResolveConcurrency, cfg.TierBackoffMax, log)
@@ -194,9 +195,10 @@ type app struct {
 	// pinMu serializes the store-mutation half of pin() (list → upsert → delete
 	// of superseded pins) so concurrent pins — API and scheduler — can't clobber
 	// each other. The network resolve runs outside it.
-	pinMu       sync.Mutex
-	wsClientsMu sync.Mutex
-	wsClients   map[*websocket.Conn]bool
+	pinMu          sync.Mutex
+	wsClientsMu    sync.Mutex
+	wsClients      map[*websocket.Conn]bool
+	lazyResolution bool
 }
 
 type addRequest struct {

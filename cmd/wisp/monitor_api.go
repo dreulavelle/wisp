@@ -6,9 +6,11 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/dreulavelle/wisp/internal/library"
 	"github.com/dreulavelle/wisp/internal/monitor"
+	"github.com/dreulavelle/wisp/internal/store"
 )
 
 // Pin implements monitor.Fulfiller: resolve+pin one target. A non-Pinned outcome
@@ -16,6 +18,41 @@ import (
 // to tell a transient miss from a resolution that may never appear); a returned
 // error is a real fault (auth/rate-limit/store) worth surfacing.
 func (a *app) Pin(ctx context.Context, t monitor.Target) (monitor.PinOutcome, error) {
+	if a.lazyResolution {
+		wantQuality := library.NormalizeQuality(t.Quality)
+		ids := library.IDs{IMDb: t.IMDbID, TMDb: t.TMDbID, TVDb: t.TVDbID}
+		root := t.Category
+		if root == "" {
+			root = a.inheritCategory(ctx, t.IMDbID, t.MediaType)
+		}
+
+		ext := ".mkv"
+		var vpath string
+		if t.MediaType == "movie" {
+			vpath = library.MoviePath(root, t.Title, t.Year, ids, wantQuality, ext)
+		} else {
+			vpath = library.EpisodePath(root, t.Title, t.Year, t.Season, t.Episode, ids, wantQuality, ext)
+		}
+
+		pin := store.Pin{
+			MediaType: t.MediaType, IMDbID: t.IMDbID, TMDbID: ids.TMDb, TVDbID: ids.TVDb,
+			Category: root, Season: t.Season, Episode: t.Episode,
+			Title: t.Title, Year: t.Year, Quality: wantQuality, VirtualPath: vpath,
+			SourceURL: "",
+			Size:      0,
+			ResolvedAt: time.Now(),
+		}
+
+		if err := a.store.Upsert(ctx, pin); err != nil {
+			return monitor.NoResults, err
+		}
+
+		a.webhook.Import(ctx, t.MediaType, vpath)
+		a.broadcastPinCompleted(t.MediaType, t.IMDbID, ids.TMDb, ids.TVDb, vpath)
+		a.log.Info("created placeholder pin", "path", vpath, "imdb", t.IMDbID)
+		return monitor.Pinned, nil
+	}
+
 	_, _, err := a.pin(ctx, pinSpec{
 		MediaType: t.MediaType, IMDbID: t.IMDbID, TMDbID: t.TMDbID, TVDbID: t.TVDbID,
 		Title: t.Title, Year: t.Year, Season: t.Season, Episode: t.Episode, Quality: t.Quality,

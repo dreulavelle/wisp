@@ -87,6 +87,11 @@ type Config struct {
 	// starts only after the probe acquires a concurrency permit, so queue wait
 	// never eats the network budget. Clamped to [2s, 30s].
 	ProbeTimeout time.Duration
+
+	// LazyResolution, when enabled, creates placeholder pins with 0 size and empty URL
+	// immediately when a title is monitored, allowing immediate media-server cataloging
+	// with stream resolution happening on-demand upon first playback request.
+	LazyResolution bool
 }
 
 // SelfMount reports whether wisp should mount the library itself.
@@ -120,6 +125,7 @@ func Load() (*Config, error) {
 		ProbeConcurrency:     clampInt(intEnv("WISP_PROBE_CONCURRENCY", 8), 1, 32),
 		ProbeWindow:          clampInt(intEnv("WISP_PROBE_WINDOW", 3), 1, 8),
 		ProbeTimeout:         clampDuration(durationEnv("WISP_PROBE_TIMEOUT", 10*time.Second), 2*time.Second, 30*time.Second),
+		LazyResolution:       boolEnv("WISP_LAZY_RESOLUTION", true),
 	}
 	if c.AIOStreamsURL == "" {
 		return nil, fmt.Errorf("WISP_AIOSTREAMS_URL is required")

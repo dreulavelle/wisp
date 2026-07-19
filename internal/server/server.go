@@ -218,6 +218,21 @@ func (s *Server) serveFile(w http.ResponseWriter, r *http.Request, pin *store.Pi
 		return
 	}
 
+	if pin.SourceURL == "" {
+		if s.reresolve != nil {
+			s.log.Warn("placeholder pin requested; resolving", "path", pin.VirtualPath)
+			s.reResolves.Add(1)
+			if err := s.reresolve(r.Context(), pin); err != nil {
+				s.log.Error("resolution failed", "path", pin.VirtualPath, "error", err)
+				http.Error(w, "stream temporarily unavailable", http.StatusBadGateway)
+				return
+			}
+		} else {
+			http.Error(w, "no resolver configured for placeholder", http.StatusInternalServerError)
+			return
+		}
+	}
+
 	s.reqServed.Add(1)
 	s.log.Debug("serving", "path", pin.VirtualPath, "range", r.Header.Get("Range"))
 
