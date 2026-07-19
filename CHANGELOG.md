@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.3.1](https://github.com/dreulavelle/wisp/compare/v1.3.0...v1.3.1) (2026-07-19)
+
+
+### Bug Fixes
+
+* add WISP_NOTIFY_MOUNT_PATH and deprecate the implicit default ([3b3f7ce](https://github.com/dreulavelle/wisp/commit/3b3f7ce5d128060180901fe6d4fac599414f0bfd))
+* announce on-demand placeholder resolution to media servers ([1a45070](https://github.com/dreulavelle/wisp/commit/1a45070e3baf631eba1a667d0b63e24a48ffa05f))
+* repair lazy-resolution placeholder lifecycle and ws leaks ([4a8bb94](https://github.com/dreulavelle/wisp/commit/4a8bb94b3b0dddb9745acdaa5c35ec876a2d50c0))
+* resolve default-quality naming, ws race, tmdb fallback, and placeholder sizing ([ede4147](https://github.com/dreulavelle/wisp/commit/ede4147fadd2a15a821a5290724c5eba186870e7))
+* resolve lazy placeholder retry and document WISP_LAZY_RESOLUTION ([d3d095d](https://github.com/dreulavelle/wisp/commit/d3d095d0121e66e1bb40c2d432e7e468973e8482))
+
 ## [1.3.0](https://github.com/dreulavelle/wisp/compare/v1.2.1...v1.3.0) (2026-07-19)
 
 
