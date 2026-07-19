@@ -29,6 +29,7 @@ type mediaBrowserTarget struct {
 	url        string
 	httpClient *http.Client
 	log        *slog.Logger
+	stats      targetMetrics
 }
 
 // mediaUpdate is one entry in a Library/Media/Updated request. Jellyfin and Emby
@@ -49,6 +50,8 @@ func newMediaBrowserTarget(cfg mediaBrowserConfig, log *slog.Logger) *mediaBrows
 }
 
 func (t *mediaBrowserTarget) name() string { return t.cfg.flavor }
+
+func (t *mediaBrowserTarget) metrics() *targetMetrics { return &t.stats }
 
 func (t *mediaBrowserTarget) Import(ctx context.Context, _ /*mediaType*/, virtualPath string) {
 	t.send(ctx, "import", []mediaUpdate{
@@ -100,6 +103,7 @@ func (t *mediaBrowserTarget) send(ctx context.Context, event string, updates []m
 		headers["X-Emby-Token"] = t.cfg.apiKey
 	}
 	status, err := postJSON(ctx, t.httpClient, t.url, headers, body)
+	t.stats.recordSend(status, err)
 	if err != nil {
 		t.log.Warn("mediabrowser delivery failed", "flavor", t.cfg.flavor, "event", event, "error", err)
 		return

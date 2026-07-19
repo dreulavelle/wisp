@@ -17,6 +17,7 @@ type arrTarget struct {
 	mountPath  string
 	httpClient *http.Client
 	log        *slog.Logger
+	stats      targetMetrics
 }
 
 func newArrTarget(webhookURL, mountPath string, log *slog.Logger) *arrTarget {
@@ -29,6 +30,8 @@ func newArrTarget(webhookURL, mountPath string, log *slog.Logger) *arrTarget {
 }
 
 func (t *arrTarget) name() string { return "arr-webhook" }
+
+func (t *arrTarget) metrics() *targetMetrics { return &t.stats }
 
 func (t *arrTarget) Import(ctx context.Context, mediaType, virtualPath string) {
 	full := fullPath(t.mountPath, virtualPath)
@@ -132,6 +135,7 @@ func (t *arrTarget) send(ctx context.Context, event string, payload any) {
 		return
 	}
 	status, err := postJSON(ctx, t.httpClient, t.url, nil, body)
+	t.stats.recordSend(status, err)
 	if err != nil {
 		t.log.Warn("arr webhook delivery failed", "event", event, "error", err)
 		return
