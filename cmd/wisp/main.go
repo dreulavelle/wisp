@@ -690,6 +690,48 @@ func (a *app) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	if a.prober != nil {
 		writeProbeMetrics(w, a.prober)
 	}
+	// Delivery counters live on the concrete notifier. Tests swap in their own
+	// Notifier implementation, which simply has no counters to report.
+	if n, ok := a.webhook.(notifyMetricsSource); ok {
+		writeNotifyMetrics(w, n.Metrics())
+	}
+}
+
+// notifyMetricsSource is the slice of *notify.Multi that /metrics needs. Naming
+// it here rather than widening notify.Notifier keeps delivery and observability
+// separate: a fake notifier in a test stays a three-method fake.
+type notifyMetricsSource interface {
+	Metrics() []notify.TargetMetrics
+}
+
+// writeNotifyMetrics renders per-target media-server delivery outcomes.
+//
+// These exist to answer one question with evidence: how often does wisp's
+// best-effort, never-retried notification actually fail to land? The split is
+// per target because the consumers fail for different reasons — knowing the
+// aggregate rate would not tell an operator which media server to look at.
+//
+// The help strings are deliberately careful about what a success means. wisp
+// can only observe the HTTP exchange, so "delivered" means the consumer
+// returned 2xx — it does not mean the consumer scanned anything. Silo answers
+// 202 to an ARR webhook it may then discard, and media servers coalesce rapid
+// rescan requests. A healthy success rate here is necessary, not sufficient.
+func writeNotifyMetrics(w http.ResponseWriter, targets []notify.TargetMetrics) {
+	if len(targets) == 0 {
+		return
+	}
+	fmt.Fprint(w, "# HELP wisp_notify_deliveries_total Media-server notification attempts by target and outcome. One count per outbound HTTP request, not per file: a coalesced import batch is a single attempt covering many files. result=\"success\" means the consumer answered 2xx, i.e. it accepted the notification — NOT that it rescanned anything (Silo returns 202 and may still discard the event). result=\"failure\" means a transport error or a non-2xx response; nothing retries these, so the event is lost.\n")
+	fmt.Fprint(w, "# TYPE wisp_notify_deliveries_total counter\n")
+	for _, t := range targets {
+		fmt.Fprintf(w, "wisp_notify_deliveries_total{target=%q,result=%q} %d\n", t.Target, "success", t.Delivered)
+		fmt.Fprintf(w, "wisp_notify_deliveries_total{target=%q,result=%q} %d\n", t.Target, "failure", t.Failed)
+	}
+
+	fmt.Fprint(w, "# HELP wisp_notify_dropped_total Events discarded before any delivery was attempted, and so counted in neither result of wisp_notify_deliveries_total. Only the Plex target can drop this way today: no configured library section covers the changed folder, which is a silent loss caused by configuration rather than by the network.\n")
+	fmt.Fprint(w, "# TYPE wisp_notify_dropped_total counter\n")
+	for _, t := range targets {
+		fmt.Fprintf(w, "wisp_notify_dropped_total{target=%q} %d\n", t.Target, t.Dropped)
+	}
 }
 
 // writeProbeMetrics renders the concurrent-probe counters in Prometheus text

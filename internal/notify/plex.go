@@ -27,6 +27,8 @@ type plexTarget struct {
 	httpClient *http.Client
 	log        *slog.Logger
 
+	stats targetMetrics
+
 	mu        sync.Mutex
 	sections  []plexSection
 	fetchedAt time.Time
@@ -59,6 +61,8 @@ func newPlexTarget(baseURL, token, mountPath string, log *slog.Logger) *plexTarg
 }
 
 func (t *plexTarget) name() string { return "plex" }
+
+func (t *plexTarget) metrics() *targetMetrics { return &t.stats }
 
 func (t *plexTarget) Import(ctx context.Context, _ /*mediaType*/, virtualPath string) {
 	t.refreshDirs(ctx, "import", virtualPath)
@@ -94,6 +98,11 @@ func (t *plexTarget) refreshDirs(ctx context.Context, event string, virtualPaths
 	}
 	sections, err := t.getSections(ctx)
 	if err != nil {
+		// The section list is a prerequisite for every refresh below, so a
+		// failed lookup loses the whole event. Count it once: one round-trip to
+		// Plex was attempted, and it failed. (A stale-cache fallback returns a
+		// nil error and is not counted here — the refreshes still go out.)
+		t.stats.recordSend(0, err)
 		t.log.Warn("plex section lookup failed", "event", event, "error", err)
 		return
 	}
@@ -106,6 +115,10 @@ func (t *plexTarget) refreshDirs(ctx context.Context, event string, virtualPaths
 		seen[dir] = true
 		key, ok := sectionForPath(sections, dir)
 		if !ok {
+			// Nothing is sent and nothing is retried: the event is gone. This is
+			// a configuration mismatch rather than a delivery failure, so it
+			// gets its own counter instead of inflating the failure rate.
+			t.stats.recordDrop()
 			t.log.Warn("plex has no section covering path", "event", event, "path", dir)
 			continue
 		}
@@ -127,6 +140,7 @@ func (t *plexTarget) refresh(ctx context.Context, event, sectionKey, dir string)
 		req.Header.Set("X-Plex-Token", t.token)
 	}
 	status, err := doAndDrain(t.httpClient, req)
+	t.stats.recordSend(status, err)
 	if err != nil {
 		t.log.Warn("plex refresh delivery failed", "event", event, "error", err)
 		return

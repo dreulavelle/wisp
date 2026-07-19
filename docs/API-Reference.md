@@ -182,6 +182,27 @@ Prometheus text-format metrics: `wisp_pins`, `wisp_mounted`, `wisp_uptime_second
 `wisp_file_requests_total`, `wisp_link_cache_hits_total`,
 `wisp_link_cache_misses_total`, `wisp_reresolves_total`, `wisp_link_cache_entries`.
 
+### Media-server notification delivery
+
+`wisp_notify_deliveries_total{target,result}` counts notification attempts per
+configured target (`arr-webhook`, `jellyfin`, `emby`, `plex`). One count per
+outbound HTTP request — a coalesced import batch is one attempt covering many
+files, so this is a rate over requests, not over files.
+
+`result="success"` means the consumer answered `2xx`. That is **acceptance, not
+action**: Silo's Autoscan intake returns `202` and may still discard the event,
+and media servers coalesce rapid rescan requests. A high success rate here rules
+out delivery as a cause of lost notifications; it does not prove they landed.
+
+`result="failure"` means a transport error or a non-2xx response. Delivery is
+best-effort and nothing retries, so these events are lost.
+
+`wisp_notify_dropped_total{target}` counts events discarded before any request
+was attempted, and so counted in neither `result`. Only `plex` can drop this way
+today: no configured library section covers the changed folder. It is split out
+because it is a configuration gap rather than a network failure, and the two
+call for different fixes.
+
 ## `GET /api/healthz`
 
 `200 ok` — liveness probe. Always `200` if the process is serving HTTP at all;

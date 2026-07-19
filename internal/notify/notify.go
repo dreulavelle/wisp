@@ -43,8 +43,12 @@ type Notifier interface {
 // its own payload shape and transport; the Multi fans events out to all of them.
 type target interface {
 	Notifier
-	// name identifies the target in log lines.
+	// name identifies the target in log lines and as the Prometheus label.
 	name() string
+	// metrics returns the target's own delivery-outcome counters. Each target
+	// owns its counters for the life of the notifier, so recording an outcome
+	// is a bare atomic add with no lookup or lock on the delivery path.
+	metrics() *targetMetrics
 	// ImportBatch delivers a burst of imports that share a media type and a
 	// parent directory. Each target decides how to represent the burst — the
 	// right answer differs per protocol, so this is deliberately not a loop

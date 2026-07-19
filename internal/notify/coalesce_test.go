@@ -16,6 +16,7 @@ type fakeTarget struct {
 	renames [][2]string
 	deletes []string
 	got     chan struct{}
+	stats   targetMetrics
 }
 
 func newFakeTarget() *fakeTarget {
@@ -23,6 +24,8 @@ func newFakeTarget() *fakeTarget {
 }
 
 func (f *fakeTarget) name() string { return "fake" }
+
+func (f *fakeTarget) metrics() *targetMetrics { return &f.stats }
 
 func (f *fakeTarget) ImportBatch(_ context.Context, b importBatch) {
 	f.mu.Lock()
