@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.1](https://github.com/dreulavelle/wisp/compare/v1.2.0...v1.2.1) (2026-07-19)
+
+
+### Performance
+
+* concurrent candidate probing with a global probe budget ([#28](https://github.com/dreulavelle/wisp/issues/28)) ([7b6e22b](https://github.com/dreulavelle/wisp/commit/7b6e22bb6df43428a6d6fdf40ac20e879dfb5797))
+
 ## [1.2.0](https://github.com/dreulavelle/wisp/compare/v1.1.1...v1.2.0) (2026-07-19)
 
 
