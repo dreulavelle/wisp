@@ -71,7 +71,7 @@ func main() {
 	app := &app{
 		store: st, aio: aio, log: log, mountPath: cfg.MountPath,
 		webhook:   notifier,
-		meta:      metadata.New(cfg.TMDBAPIKey, cfg.TMDBMarkets),
+		meta:      metadata.New(cfg.TMDBAPIKey, cfg.TMDBMarkets, metadata.WithLogger(log)),
 		startedAt: time.Now(),
 	}
 	app.mon = monitor.New(st, app.meta, app, cfg.ScheduleInterval, log)

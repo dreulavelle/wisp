@@ -13,8 +13,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -33,6 +35,12 @@ type Service struct {
 	http        *http.Client
 	tmdbKey     string
 	tmdbMarkets []string
+	log         *slog.Logger
+
+	// tmdbFallbackWarn logs the "TMDB call failed, falling back to Cinemeta"
+	// warning once (not once per movie) so a bad/expired key is surfaced without
+	// spamming the log on every title.
+	tmdbFallbackWarn sync.Once
 
 	// Base URLs, overridable in tests.
 	cinemetaBase string
@@ -48,6 +56,16 @@ func WithBaseURLs(cinemeta, tmdb, tvmaze string) Option {
 	return func(s *Service) { s.cinemetaBase, s.tmdbBase, s.tvmazeBase = cinemeta, tmdb, tvmaze }
 }
 
+// WithLogger sets the logger used for non-fatal warnings (e.g. a TMDB fallback).
+// When unset, the service uses slog.Default().
+func WithLogger(log *slog.Logger) Option {
+	return func(s *Service) {
+		if log != nil {
+			s.log = log
+		}
+	}
+}
+
 // New builds a metadata service. tmdbKey may be empty (movie gating then falls
 // back to Cinemeta); markets defaults to US when empty.
 func New(tmdbKey string, markets []string, opts ...Option) *Service {
@@ -58,6 +76,7 @@ func New(tmdbKey string, markets []string, opts ...Option) *Service {
 		http:         &http.Client{Timeout: 25 * time.Second},
 		tmdbKey:      strings.TrimSpace(tmdbKey),
 		tmdbMarkets:  markets,
+		log:          slog.Default(),
 		cinemetaBase: "https://v3-cinemeta.strem.io",
 		tmdbBase:     "https://api.themoviedb.org/3",
 		tvmazeBase:   "https://api.tvmaze.com",

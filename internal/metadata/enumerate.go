@@ -83,15 +83,32 @@ func NextAir(eps []Episode, after time.Time) (t time.Time, ok bool) {
 // ErrNoHomeRelease when TMDB confirms the movie is theatrical-only (so the
 // caller keeps monitoring rather than pinning a cam).
 func (s *Service) MovieReleaseDate(ctx context.Context, imdbID, tmdbID string, now time.Time) (time.Time, error) {
+	imdbOK := strings.HasPrefix(strings.TrimSpace(imdbID), "tt")
 	if s.HasTMDB() && strings.TrimSpace(tmdbID) != "" {
-		// TMDB is authoritative for home-media dates. A transient TMDB failure
-		// must NOT fall back to Cinemeta, whose date is theatrical/general — that
-		// would let a title in theaters look "released" and pin a cam. Propagate
-		// the error so the monitor retries; the release stays gated until TMDB
-		// answers (with a date, or ErrNoHomeRelease for theatrical-only).
-		return s.MovieHomeRelease(ctx, tmdbID)
+		release, err := s.MovieHomeRelease(ctx, tmdbID)
+		switch {
+		case err == nil:
+			return release, nil
+		case errors.Is(err, ErrNoHomeRelease):
+			// TMDB answered and the movie is genuinely theatrical-only. This is a
+			// real "not home-released yet" signal, not a call failure — do NOT fall
+			// back to Cinemeta's theatrical/general date (which would pin a cam).
+			return time.Time{}, err
+		case !imdbOK:
+			// The TMDB call failed but there's no Cinemeta fallback available (no
+			// imdb id) — surface the real error so the monitor retries.
+			return time.Time{}, err
+		default:
+			// The TMDB *call* failed (auth 401/403, network, 5xx, decode). A bad or
+			// expired key must behave no worse than no key configured: fall back to
+			// Cinemeta so one broken key doesn't block every movie behind it.
+			s.tmdbFallbackWarn.Do(func() {
+				s.log.Warn("TMDB release lookup failed; falling back to Cinemeta (check WISP_TMDB_API_KEY)", "error", err)
+			})
+			// fall through to the Cinemeta path below
+		}
 	}
-	if strings.HasPrefix(strings.TrimSpace(imdbID), "tt") {
+	if imdbOK {
 		return s.cinemetaMovieReleased(ctx, imdbID, now)
 	}
 	return time.Time{}, fmt.Errorf("metadata: no release-date source (need TMDB key or imdb id)")
