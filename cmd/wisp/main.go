@@ -70,10 +70,16 @@ func main() {
 	}
 	app := &app{
 		store: st, aio: aio, log: log, mountPath: cfg.MountPath,
-		webhook:   notifier,
-		meta:      metadata.New(cfg.TMDBAPIKey, cfg.TMDBMarkets, metadata.WithLogger(log)),
+		webhook: notifier,
+		meta:    metadata.New(cfg.TMDBAPIKey, cfg.TMDBMarkets, metadata.WithLogger(log)),
+		prober: newProber(probeConfig{
+			Concurrency: cfg.ProbeConcurrency,
+			Window:      cfg.ProbeWindow,
+			Timeout:     cfg.ProbeTimeout,
+		}, log),
 		startedAt: time.Now(),
 	}
+	log.Info("probe limits", "concurrency", cfg.ProbeConcurrency, "window", cfg.ProbeWindow, "timeout", cfg.ProbeTimeout)
 	app.mon = monitor.New(st, app.meta, app, cfg.ScheduleInterval, cfg.ResolveConcurrency, cfg.TierBackoffMax, log)
 
 	srv := server.New(st, app.reResolve, log)
@@ -180,6 +186,7 @@ type app struct {
 	webhook   notify.Notifier
 	meta      *metadata.Service
 	mon       *monitor.Monitor
+	prober    *prober
 	mountPath string
 	startedAt time.Time
 	// pinMu serializes the store-mutation half of pin() (list → upsert → delete
@@ -552,6 +559,37 @@ func (a *app) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	metric("wisp_link_cache_misses_total", "CDN URL cache misses (permalink resolves).", "counter", m.CacheMisses)
 	metric("wisp_reresolves_total", "Self-heal re-resolves via AIOStreams.", "counter", m.ReResolves)
 	metric("wisp_link_cache_entries", "Cached CDN URLs currently held.", "gauge", int64(m.LinkCacheSize))
+	if a.prober != nil {
+		writeProbeMetrics(w, a.prober)
+	}
+}
+
+// writeProbeMetrics renders the concurrent-probe counters in Prometheus text
+// format alongside the other wisp_* series. Durations are summary-style
+// (sum + count) so averages can be charted without a histogram dependency.
+func writeProbeMetrics(w http.ResponseWriter, p *prober) {
+	ps := p.metrics.snapshot()
+	metric := func(name, help, typ string, val int64) {
+		fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s %s\n%s %d\n", name, help, name, typ, name, val)
+	}
+	metric("wisp_probe_selections_total", "Candidate-selection passes (one per resolve).", "counter", ps.Selections)
+	metric("wisp_probe_candidates_total", "Candidate streams attempted (probes launched).", "counter", ps.Candidates)
+	metric("wisp_probe_requests_total", "Probe HTTP requests issued (permit held).", "counter", ps.Requests)
+
+	fmt.Fprint(w, "# HELP wisp_probe_failures_total Probe failures by reason.\n# TYPE wisp_probe_failures_total counter\n")
+	fmt.Fprintf(w, "wisp_probe_failures_total{reason=%q} %d\n", "timeout", ps.FailTimeout)
+	fmt.Fprintf(w, "wisp_probe_failures_total{reason=%q} %d\n", "rate_limited", ps.FailRateLimit)
+	fmt.Fprintf(w, "wisp_probe_failures_total{reason=%q} %d\n", "dead", ps.FailDead)
+	fmt.Fprintf(w, "wisp_probe_failures_total{reason=%q} %d\n", "non_media", ps.FailNonMedia)
+	fmt.Fprintf(w, "wisp_probe_failures_total{reason=%q} %d\n", "canceled", ps.FailCanceled)
+
+	fmt.Fprint(w, "# HELP wisp_probe_queue_wait_seconds Time probes spent waiting for a concurrency permit.\n# TYPE wisp_probe_queue_wait_seconds summary\n")
+	fmt.Fprintf(w, "wisp_probe_queue_wait_seconds_sum %g\n", float64(ps.QueueWaitNanos)/float64(time.Second))
+	fmt.Fprintf(w, "wisp_probe_queue_wait_seconds_count %d\n", ps.QueueWaitCount)
+
+	fmt.Fprint(w, "# HELP wisp_probe_duration_seconds Probe HTTP round-trip duration.\n# TYPE wisp_probe_duration_seconds summary\n")
+	fmt.Fprintf(w, "wisp_probe_duration_seconds_sum %g\n", float64(ps.ProbeNanos)/float64(time.Second))
+	fmt.Fprintf(w, "wisp_probe_duration_seconds_count %d\n", ps.ProbeCount)
 }
 
 func writeJSON(w http.ResponseWriter, v any) {
@@ -611,8 +649,14 @@ func (a *app) resolve(ctx context.Context, mediaType, imdbID string, season, epi
 		}
 		streams = filtered
 	}
-	stream, size, err := selectPlayableStream(ctx, streams)
+	stream, size, err := a.prober.selectPlayableStream(ctx, streams)
 	if err != nil {
+		// Preserve a provider 429 as a real fault so the caller can back off and
+		// honor Retry-After; everything else is a benign "nothing probeable yet".
+		var rl *rateLimitedError
+		if errors.As(err, &rl) {
+			return "", 0, "", "", err
+		}
 		return "", 0, "", "", errNoPlayable
 	}
 	return stream.URL, size, stream.Filename, stream.Resolution, nil
@@ -663,7 +707,16 @@ func writeAddError(w http.ResponseWriter, log *slog.Logger, req addRequest, err 
 	// surfaces as an error a feeder acts on rather than a monitorable "no stream".
 	status, code, message := http.StatusServiceUnavailable, "upstream_unavailable", "AIOStreams unavailable"
 	var se *aiostreams.SearchError
+	var rl *rateLimitedError
 	switch {
+	case errors.As(err, &rl):
+		// A provider 429 seen while probing: surface it as rate-limited and honor
+		// Retry-After so the caller backs off rather than treating it as no-stream.
+		status, code, message = http.StatusTooManyRequests, "rate_limited", "provider rate limited; retry later"
+		if rl.RetryAfter > 0 {
+			secs := int((rl.RetryAfter + time.Second - 1) / time.Second)
+			w.Header().Set("Retry-After", strconv.Itoa(secs))
+		}
 	case errors.Is(err, errNoQualityMatch):
 		status, code, message = http.StatusBadGateway, "no_quality_match", "no stream matches the requested quality"
 	case errors.Is(err, errNoResults), errors.Is(err, errNoPlayable):
@@ -688,56 +741,6 @@ func writeAddError(w http.ResponseWriter, log *slog.Logger, req addRequest, err 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(map[string]any{"error": code, "message": message})
-}
-
-func selectPlayableStream(ctx context.Context, streams []aiostreams.Stream) (aiostreams.Stream, int64, error) {
-	var lastErr error
-	for _, stream := range streams {
-		size, err := probeSize(ctx, stream.URL)
-		if err == nil {
-			return stream, size, nil
-		}
-		lastErr = err
-	}
-	return aiostreams.Stream{}, 0, fmt.Errorf("all %d results failed probing: %w", len(streams), lastErr)
-}
-
-// probeSize uses a one-byte ranged GET because AIOStreams resolver permalinks
-// do not support HEAD. For a partial response, Content-Range carries the full
-// media size; servers that ignore Range may instead return 200 + Content-Length.
-func probeSize(ctx context.Context, rawURL string) (int64, error) {
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
-	if err != nil {
-		return 0, err
-	}
-	req.Header.Set("User-Agent", "wisp")
-	req.Header.Set("Range", "bytes=0-0")
-	req.Header.Set("Accept-Encoding", "identity")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return 0, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
-		return 0, fmt.Errorf("upstream returned HTTP %d", resp.StatusCode)
-	}
-	contentType := strings.ToLower(resp.Header.Get("Content-Type"))
-	if strings.HasPrefix(contentType, "text/") || strings.Contains(contentType, "json") {
-		return 0, fmt.Errorf("upstream returned non-media content type %q", contentType)
-	}
-	if resp.StatusCode == http.StatusPartialContent {
-		size, err := contentRangeSize(resp.Header.Get("Content-Range"))
-		if err != nil {
-			return 0, err
-		}
-		return size, nil
-	}
-	if resp.ContentLength <= 0 {
-		return 0, fmt.Errorf("upstream did not report a size (HTTP %d)", resp.StatusCode)
-	}
-	return resp.ContentLength, nil
 }
 
 func contentRangeSize(value string) (int64, error) {

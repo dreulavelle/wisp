@@ -36,6 +36,7 @@ func offlineApp(t *testing.T) *app {
 		store: st, log: log, startedAt: time.Now(),
 		meta:    metadata.New("", nil, metadata.WithBaseURLs(stub.URL, stub.URL, stub.URL)),
 		webhook: notify.New(notify.Options{}, log),
+		prober:  testProber(),
 	}
 	a.mon = monitor.New(st, a.meta, a, time.Hour, 4, 7*24*time.Hour, log)
 	return a
@@ -357,6 +358,7 @@ func TestIntakeDoesNotBlockOnMetadata(t *testing.T) {
 		store: st, log: log, startedAt: time.Now(),
 		meta:    metadata.New("", nil, metadata.WithBaseURLs(slow.URL, slow.URL, slow.URL)),
 		webhook: notify.New(notify.Options{}, log),
+		prober:  testProber(),
 	}
 	a.mon = monitor.New(st, a.meta, a, time.Hour, 4, 7*24*time.Hour, log)
 
