@@ -1,5 +1,23 @@
 # Changelog
 
+## [1.3.0](https://github.com/dreulavelle/wisp/compare/v1.2.1...v1.3.0) (2026-07-19)
+
+
+### Features
+
+* add WebSocket route and pinned_paths to status API ([030cc8f](https://github.com/dreulavelle/wisp/commit/030cc8f1014a39812d9539b95124685f3efa8b8b))
+* add WISP_LAZY_RESOLUTION placeholder and on-demand streaming ([cc052dc](https://github.com/dreulavelle/wisp/commit/cc052dce63f3c470f32b28ed5df73c21f92efc66))
+
+
+### Bug Fixes
+
+* change placeholder size to 1 to force VFS read calls to hit the backend ([4035446](https://github.com/dreulavelle/wisp/commit/4035446fe86974c64eaebd21597ebeb4e5e0cbc4))
+
+
+### Performance
+
+* set DirCacheTime to 0 to disable VFS directory caching for instant file size updates ([d26455e](https://github.com/dreulavelle/wisp/commit/d26455ec2f910cfccbd9e7f1674d3c69fbad84b0))
+
 ## [1.2.1](https://github.com/dreulavelle/wisp/compare/v1.2.0...v1.2.1) (2026-07-19)
 
 
