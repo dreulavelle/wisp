@@ -3,8 +3,46 @@
 Base URL: `http://<host>:8080` (default). All bodies are JSON.
 
 wisp's API is intentionally tiny — it is *fed* by whatever you already use
-(see [Feeding wisp](Feeding-wisp.md)). There is no auth on the API today; keep it
-on a trusted network.
+(see [Feeding wisp](Feeding-wisp.md)).
+
+---
+
+## Authentication
+
+Optional and **off by default**. With `WISP_API_TOKEN` unset, every endpoint is
+open to anyone who can reach the port — keep it on a trusted network.
+
+Set `WISP_API_TOKEN` and wisp requires a bearer token on every endpoint below
+*except* `/api/health` and `/api/healthz` (a Docker healthcheck can't send a
+header) and file serving (the FUSE mount reads through it). See
+[Configuration → API authentication](Configuration.md#api-authentication) for
+the full table and the limits of what this protects.
+
+```
+Authorization: Bearer <WISP_API_TOKEN>
+```
+
+```sh
+curl -H "Authorization: Bearer $WISP_API_TOKEN" http://localhost:8080/api/pins
+```
+
+**Failures are always `401`** — a missing header, a non-`Bearer` scheme, an
+empty credential, and a wrong token all return the same response. There is no
+`403`: a wrong token is a failed authentication, not a permission decision, and
+answering differently for "malformed" versus "wrong" would tell a prober that
+its candidate reached the comparison.
+
+```
+HTTP/1.1 401 Unauthorized
+WWW-Authenticate: Bearer
+Content-Type: application/json
+
+{"error":"unauthorized","message":"a valid bearer token is required"}
+```
+
+The scheme is matched case-insensitively. Tokens are compared in constant time,
+and a rejected token is never written to the response or the logs — auth
+failures log at `warn` with the remote address only.
 
 ---
 
@@ -163,7 +201,8 @@ The body is for humans; don't parse it.
 ```
 
 `status` is `ok` or `mount_down`. `mounted` is present only when wisp is
-self-mounting. No auth, and no paths, URLs, or tokens are exposed.
+self-mounting. This endpoint is never gated by `WISP_API_TOKEN`, and no paths,
+URLs, or tokens are exposed.
 
 What "ready" means depends on how wisp is deployed:
 
@@ -202,3 +241,7 @@ Everything not under `/api/` is the virtual filesystem:
   stream, with [self-heal](Architecture.md#the-self-heal-model) on a dead upstream.
 
 You normally don't call these directly — the rclone mount does.
+
+These paths are **never** gated by `WISP_API_TOKEN` — gating them would break
+both wisp's own mount and any external `rclone mount`. Setting a token does not
+stop someone who can reach the port from browsing and streaming the library.

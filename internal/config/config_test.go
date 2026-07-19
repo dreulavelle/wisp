@@ -266,3 +266,32 @@ func TestLoadAcceptsRemovedLazyResolution(t *testing.T) {
 		})
 	}
 }
+
+// The API token is optional and off by default: an unset — or whitespace-only —
+// value must leave APIToken empty, which is what disables authentication and
+// keeps existing unauthenticated deployments working across an upgrade.
+func TestLoadAPIToken(t *testing.T) {
+	t.Setenv("WISP_AIOSTREAMS_URL", "https://host/stremio/uuid/blob/manifest.json")
+
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.APIToken != "" {
+		t.Fatalf("APIToken = %q, want empty by default (auth off)", c.APIToken)
+	}
+
+	t.Setenv("WISP_API_TOKEN", "   ")
+	if c, err = Load(); err != nil {
+		t.Fatal(err)
+	} else if c.APIToken != "" {
+		t.Fatalf("APIToken = %q, want empty — a whitespace-only value is not a token", c.APIToken)
+	}
+
+	t.Setenv("WISP_API_TOKEN", "  s3cret  ")
+	if c, err = Load(); err != nil {
+		t.Fatal(err)
+	} else if c.APIToken != "s3cret" {
+		t.Fatalf("APIToken = %q, want %q (trimmed)", c.APIToken, "s3cret")
+	}
+}

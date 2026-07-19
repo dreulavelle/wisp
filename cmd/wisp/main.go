@@ -108,24 +108,12 @@ func main() {
 	defer monCancel()
 	go app.mon.Run(monCtx)
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("POST /api/add", app.handleAdd)
-	mux.HandleFunc("GET /api/pins", app.handleListPins)
-	mux.HandleFunc("DELETE /api/pins", app.handleDeletePin)
-	mux.HandleFunc("POST /api/monitors", app.handleCreateMonitor)
-	mux.HandleFunc("GET /api/monitors", app.handleListMonitors)
-	mux.HandleFunc("DELETE /api/monitors", app.handleDeleteMonitor)
-	mux.HandleFunc("POST /api/monitors/refresh", app.handleRefreshMonitors)
-	mux.HandleFunc("GET /api/schedule", app.handleSchedule)
-	mux.HandleFunc("GET /api/requests/status", app.handleRequestStatus)
-	mux.HandleFunc("GET /api/status", app.handleStatus)
-	mux.HandleFunc("GET /api/health", app.handleHealth)
-	mux.HandleFunc("GET /metrics", app.handleMetrics)
-	mux.HandleFunc("GET /api/healthz", func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		fmt.Fprint(w, "ok")
-	})
-	mux.HandleFunc("/", srv.FileHandler)
+	if cfg.APIToken != "" {
+		log.Info("API authentication enabled; control-plane endpoints require Authorization: Bearer (health probes and file serving stay open)")
+	} else {
+		log.Warn("no WISP_API_TOKEN set; the API is unauthenticated and anyone who can reach this port can list or delete your pins and monitors — set WISP_API_TOKEN, or keep the port off untrusted networks")
+	}
+	mux := newMux(app, http.HandlerFunc(srv.FileHandler), cfg.APIToken, log)
 
 	httpSrv := &http.Server{Addr: cfg.ListenAddr, Handler: mux}
 	go func() {
@@ -183,6 +171,62 @@ func main() {
 			log.Warn("unmount", "error", err)
 		}
 	}
+}
+
+// newMux builds wisp's route table. An empty token leaves every route open,
+// which is the pre-1.5 behavior and the default.
+//
+// The split is between wisp's control plane and everything a credential-less
+// consumer must still reach:
+//
+//   - Protected: every mutating endpoint (a caller who reaches them can delete
+//     the whole library), and every read endpoint that discloses what the user
+//     has or has asked for — pins, monitors, the schedule, request status. Read
+//     -only is not the same as harmless: the pin list *is* the library. /metrics
+//     and /api/status join them; they leak only counts and version, but nothing
+//     credential-less consumes them (Prometheus sends bearer tokens natively via
+//     `authorization:` in a scrape config), so there is no cost to closing them.
+//
+//   - Public: the two health probes. A Docker healthcheck runs
+//     `wget --spider` with no way to attach a header, so gating these would wedge
+//     `depends_on: {condition: service_healthy}` for every dependent container.
+//     Their bodies carry only a status string and two booleans — no paths, URLs,
+//     or tokens — so nothing is disclosed by leaving them open.
+//
+//   - Public: file serving. This is the data plane the FUSE mount reads
+//     through, and it cannot be closed without breaking mounts. rclone's http
+//     backend would need the token threaded into its connection string, where it
+//     risks surfacing in rclone's own logs and error messages, and every
+//     deployment that mounts with an *external* rclone (a documented, supported
+//     mode wisp cannot reach into) would break the moment an operator set the
+//     token. Directory listings therefore still expose the library tree; that is
+//     stated plainly in the docs, because a security control that is half-true is
+//     worse than one whose limits are known.
+func newMux(a *app, fileHandler http.Handler, token string, log *slog.Logger) *http.ServeMux {
+	mux := http.NewServeMux()
+	auth := requireBearer(token, log)
+	protected := func(pattern string, h http.HandlerFunc) { mux.Handle(pattern, auth(h)) }
+
+	protected("POST /api/add", a.handleAdd)
+	protected("GET /api/pins", a.handleListPins)
+	protected("DELETE /api/pins", a.handleDeletePin)
+	protected("POST /api/monitors", a.handleCreateMonitor)
+	protected("GET /api/monitors", a.handleListMonitors)
+	protected("DELETE /api/monitors", a.handleDeleteMonitor)
+	protected("POST /api/monitors/refresh", a.handleRefreshMonitors)
+	protected("GET /api/schedule", a.handleSchedule)
+	protected("GET /api/requests/status", a.handleRequestStatus)
+	protected("GET /api/status", a.handleStatus)
+	protected("GET /metrics", a.handleMetrics)
+
+	// Public — see the doc comment above before moving anything below this line.
+	mux.HandleFunc("GET /api/health", a.handleHealth)
+	mux.HandleFunc("GET /api/healthz", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, "ok")
+	})
+	mux.Handle("/", fileHandler)
+	return mux
 }
 
 // parseLevel maps a config string to a slog level, defaulting to info.
