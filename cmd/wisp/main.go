@@ -27,7 +27,6 @@ import (
 	"github.com/dreulavelle/wisp/internal/server"
 	"github.com/dreulavelle/wisp/internal/store"
 	"github.com/rclone/rclone/fs"
-	"golang.org/x/net/websocket"
 )
 
 func main() {
@@ -121,7 +120,6 @@ func main() {
 	mux.HandleFunc("GET /api/requests/status", app.handleRequestStatus)
 	mux.HandleFunc("GET /api/status", app.handleStatus)
 	mux.HandleFunc("GET /api/health", app.handleHealth)
-	mux.Handle("GET /api/ws", websocket.Handler(app.handleWS))
 	mux.HandleFunc("GET /metrics", app.handleMetrics)
 	mux.HandleFunc("GET /api/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -226,12 +224,7 @@ type app struct {
 	// pinMu serializes the store-mutation half of pin() (list → upsert → delete
 	// of superseded pins) so concurrent pins — API and scheduler — can't clobber
 	// each other. The network resolve runs outside it.
-	pinMu       sync.Mutex
-	wsClientsMu sync.Mutex
-	wsClients   map[*websocket.Conn]chan []byte
-	// wsReadTimeoutOverride shortens the WebSocket idle eviction window; zero
-	// means defaultWSReadTimeout. Only tests set it.
-	wsReadTimeoutOverride time.Duration
+	pinMu sync.Mutex
 	// mountHealthyOverride stubs the FUSE mount probe, which is otherwise
 	// unreachable without a real mount. Only tests set it.
 	mountHealthyOverride func() bool
@@ -448,7 +441,6 @@ func (a *app) pin(ctx context.Context, s pinSpec) (vpath string, size int64, err
 	if len(renamedPaths) == 0 {
 		a.webhook.Import(ctx, s.MediaType, vpath)
 	}
-	a.broadcastPinCompleted(s.MediaType, searchID, ids.TMDb, ids.TVDb, vpath)
 	return vpath, size, nil
 }
 
@@ -709,9 +701,8 @@ var (
 // a cached result set is exactly what must not be reused.
 //
 // A self-heal deliberately notifies nothing. The virtual path and the entry the
-// media server already holds are unchanged, so a pin_completed broadcast or an
-// import webhook would be pure noise, and a flaky upstream can self-heal
-// repeatedly within a single playback.
+// media server already holds are unchanged, so an import webhook would be pure
+// noise, and a flaky upstream can self-heal repeatedly within a single playback.
 func (a *app) reResolve(ctx context.Context, p *store.Pin) error {
 	const fresh = true
 	sourceURL, size, _, _, err := a.resolve(ctx, p.MediaType, p.IMDbID, p.Season, p.Episode, library.NormalizeQuality(p.Quality), fresh)
@@ -855,115 +846,4 @@ func contentRangeSize(value string) (int64, error) {
 		return 0, fmt.Errorf("upstream returned invalid Content-Range %q", value)
 	}
 	return size, nil
-}
-
-type wsPinMessage struct {
-	Event       string `json:"event"`
-	MediaType   string `json:"media_type"`
-	IMDbID      string `json:"imdb_id"`
-	TMDbID      string `json:"tmdb_id"`
-	TVDbID      string `json:"tvdb_id"`
-	VirtualPath string `json:"virtual_path"`
-}
-
-// defaultWSReadTimeout bounds how long a WebSocket client may stay silent before
-// wisp evicts it. golang.org/x/net/websocket has no ping/pong keepalive, so a
-// client that vanishes without a FIN (laptop sleep, wifi drop, NAT rebind) would
-// otherwise leave Receive blocked forever, holding its connection, its writer
-// goroutine, and its wsClients entry for the process lifetime — unbounded across
-// reconnects. Clients must therefore send *something* (any frame) more often
-// than this; see docs/API-Reference.md.
-const defaultWSReadTimeout = 120 * time.Second
-
-// wsReadTimeout is defaultWSReadTimeout unless a test shortened it.
-func (a *app) wsReadTimeout() time.Duration {
-	if a.wsReadTimeoutOverride > 0 {
-		return a.wsReadTimeoutOverride
-	}
-	return defaultWSReadTimeout
-}
-
-func (a *app) handleWS(ws *websocket.Conn) {
-	ch := make(chan []byte, 256)
-	a.wsClientsMu.Lock()
-	if a.wsClients == nil {
-		a.wsClients = make(map[*websocket.Conn]chan []byte)
-	}
-	a.wsClients[ws] = ch
-	a.wsClientsMu.Unlock()
-	a.log.Info("ws client connected", "remote", ws.Request().RemoteAddr)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer func() {
-		cancel()
-		a.wsClientsMu.Lock()
-		delete(a.wsClients, ws)
-		a.wsClientsMu.Unlock()
-		ws.Close()
-		a.log.Info("ws client disconnected", "remote", ws.Request().RemoteAddr)
-	}()
-
-	// Start a writer goroutine that serializes writes to the WebSocket connection.
-	// A failed send closes the conn, which unblocks the read loop below so the
-	// deferred cleanup removes the wsClients entry and cancels this goroutine.
-	go func() {
-		for {
-			select {
-			case payload, ok := <-ch:
-				if !ok {
-					return
-				}
-				if err := websocket.Message.Send(ws, string(payload)); err != nil {
-					a.log.Debug("failed to send ws message", "remote", ws.Request().RemoteAddr, "error", err)
-					ws.Close()
-					return
-				}
-			case <-ctx.Done():
-				return
-			}
-		}
-	}()
-
-	// Read loop: wisp ignores client payloads, but reading is how a closed or
-	// half-open connection is detected. The deadline is refreshed on every
-	// successful receive, so an active client is never evicted; a silent one is.
-	var msg string
-	for {
-		if err := ws.SetReadDeadline(time.Now().Add(a.wsReadTimeout())); err != nil {
-			break
-		}
-		if err := websocket.Message.Receive(ws, &msg); err != nil {
-			a.log.Debug("ws read ended", "remote", ws.Request().RemoteAddr, "error", err)
-			break
-		}
-	}
-}
-
-func (a *app) broadcastPinCompleted(mediaType, imdb, tmdb, tvdb, vpath string) {
-	a.wsClientsMu.Lock()
-	defer a.wsClientsMu.Unlock()
-	if len(a.wsClients) == 0 {
-		return
-	}
-	msg := wsPinMessage{
-		Event:       "pin_completed",
-		MediaType:   mediaType,
-		IMDbID:      imdb,
-		TMDbID:      tmdb,
-		TVDbID:      tvdb,
-		VirtualPath: vpath,
-	}
-	payload, err := json.Marshal(msg)
-	if err != nil {
-		a.log.Error("failed to marshal ws message", "error", err)
-		return
-	}
-	a.log.Debug("broadcasting ws pin_completed", "path", vpath, "clients", len(a.wsClients))
-	for _, ch := range a.wsClients {
-		select {
-		case ch <- payload:
-		default:
-			a.log.Warn("ws client channel full, dropping message")
-		}
-	}
 }

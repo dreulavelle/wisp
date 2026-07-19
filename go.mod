@@ -5,7 +5,6 @@ go 1.26.0
 require (
 	github.com/rclone/rclone v1.74.4
 	go.etcd.io/bbolt v1.4.3
-	golang.org/x/net v0.55.0
 	golang.org/x/sync v0.21.0
 )
 
@@ -60,6 +59,7 @@ require (
 	github.com/zeebo/xxh3 v1.1.0 // indirect
 	go.yaml.in/yaml/v2 v2.4.3 // indirect
 	golang.org/x/crypto v0.52.0 // indirect
+	golang.org/x/net v0.55.0 // indirect
 	golang.org/x/sys v0.45.0 // indirect
 	golang.org/x/term v0.43.0 // indirect
 	golang.org/x/text v0.38.0 // indirect
