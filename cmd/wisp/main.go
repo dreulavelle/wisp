@@ -59,10 +59,10 @@ func main() {
 		JellyfinURL:    cfg.NotifyJellyfinURL, JellyfinAPIKey: cfg.NotifyJellyfinAPIKey,
 		EmbyURL: cfg.NotifyEmbyURL, EmbyAPIKey: cfg.NotifyEmbyAPIKey,
 		PlexURL: cfg.NotifyPlexURL, PlexToken: cfg.NotifyPlexToken,
-		MountPath: cfg.NotifyMountPath,
+		MountPath: cfg.NotifyMountPath, Debounce: cfg.NotifyDebounce,
 	}, log)
 	if targets := notifier.Targets(); len(targets) > 0 {
-		log.Info("media-server notifications enabled", "targets", targets)
+		log.Info("media-server notifications enabled", "targets", targets, "debounce", cfg.NotifyDebounce)
 	}
 	if cfg.NotifyMountPathDefaulted {
 		log.Warn("DEPRECATED: notification targets are configured but neither WISP_NOTIFY_MOUNT_PATH nor WISP_MOUNT_PATH is set; falling back to the built-in default library root. Set WISP_NOTIFY_MOUNT_PATH to the path your media server sees — relying on the default is deprecated and will become an error in a future major version",
@@ -150,14 +150,28 @@ func main() {
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 	<-stop
 	log.Info("shutting down")
+
+	// Stop both producers of notifications — the scheduler and the API — before
+	// draining, so the flush below is not racing fresh pins. monCancel is also
+	// deferred; cancelling twice is harmless.
+	monCancel()
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = httpSrv.Shutdown(shutdownCtx)
+
+	// Flush pending debounced notifications and let in-flight deliveries finish
+	// before the mount goes away, so a pin that landed inside the debounce
+	// window still reaches the media server (and still resolves on disk when it
+	// scans). Bounded well inside a typical 10s container stop grace period.
+	flushCtx, flushCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer flushCancel()
+	notifier.Close(flushCtx)
+
 	if mnt != nil {
 		if err := mnt.Close(); err != nil {
 			log.Warn("unmount", "error", err)
 		}
 	}
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	_ = httpSrv.Shutdown(shutdownCtx)
 }
 
 // parseLevel maps a config string to a slog level, defaulting to info.

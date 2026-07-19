@@ -23,6 +23,7 @@ All configuration is via environment variables.
 | `WISP_NOTIFY_JELLYFIN_URL` / `_API_KEY` | — | Jellyfin (or Silo's Jellyfin-compat) base URL + admin API key; rescans via `Library/Media/Updated`. |
 | `WISP_NOTIFY_EMBY_URL` / `_API_KEY` | — | Emby base URL + API key (same protocol, routed under `/emby`). |
 | `WISP_NOTIFY_PLEX_URL` / `WISP_NOTIFY_PLEX_TOKEN` | — | Plex base URL + `X-Plex-Token`; partial-scans just the changed folder. |
+| `WISP_NOTIFY_DEBOUNCE` | `5s` | Quiet period for coalescing a burst of pins into one notification per folder (see [Notification coalescing](#notification-coalescing)). A group is also force-flushed after 6× this value, so a continuous stream can't starve it. Set to `0` to disable coalescing and notify per file, as wisp did before v1.4. Clamped to `1s`–`60s` when non-zero. |
 | `WISP_MOUNT_ALLOW_OTHER` | `true` | Expose the mount to other UIDs — needed when a media-server container reads the mount as a different user. |
 | `WISP_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error`. `debug` narrates every serve + the full self-heal path. |
 | `WISP_READ_CHUNK_SIZE` | `32M` | Initial VFS read chunk (smaller = less debrid over-fetch on seeks). |
@@ -81,6 +82,42 @@ major version.
 Delivery is best-effort on a background goroutine: a slow or unreachable server is
 logged but never blocks or fails a pin or delete. Webhook URLs and tokens are
 secrets — rotate them if exposed.
+
+### Notification coalescing
+
+A single series request pins many files in a short burst — one per episode per
+requested quality tier. Media servers defend themselves against that by
+coalescing rapid rescan requests, and they scan only the path from the request
+they kept. Because each of wisp's notifications named exactly one file, every
+notification coalesced away on the server side was a file that never got
+scanned: a measured 13-pin request (7 episodes × 2 tiers) produced only 5 scans
+and landed **3 of 7** episodes, even though a later full library scan matched all
+13 files. Many separate notifications are strictly worse than one that names
+every file.
+
+So wisp batches instead. Pins are grouped by parent directory and held until
+either nothing new has joined the group for `WISP_NOTIFY_DEBOUNCE` (default
+`5s` — comfortably longer than the ~2s gaps inside a real burst) or the group is
+`6×` that old (default `30s`, bounding worst-case latency well inside a 60s
+target). Two shows resolving at once stay two separate groups.
+
+The fix is to collapse N requests into one — **not** to widen what any request
+points at. Every target still names exact files; none is ever sent a bare
+directory. What each receives depends on what its protocol can express:
+
+- **ARR webhook (Silo/Sonarr/Radarr)** — one `Download` event carrying every
+  exact path in the plural `episodeFiles` (series) or `movieFiles` (movies)
+  array, which the consumer expands into one file-scoped ingest per path.
+- **Jellyfin / Emby** — one `Library/Media/Updated` request listing **every**
+  exact file path. That endpoint takes a list natively, so nothing is lost.
+- **Plex** — one partial scan of the shared folder. Plex already scanned folders
+  rather than files, so this just removes duplicate requests.
+
+Deletes and renames are never coalesced: they carry specific paths that a
+batched event cannot express, and they aren't part of the burst problem.
+
+Set `WISP_NOTIFY_DEBOUNCE=0` to disable batching entirely and restore the
+pre-v1.4 one-webhook-per-file behavior.
 
 ## Mount tuning (self-mount mode)
 

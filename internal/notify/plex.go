@@ -64,6 +64,18 @@ func (t *plexTarget) Import(ctx context.Context, _ /*mediaType*/, virtualPath st
 	t.refreshDirs(ctx, "import", virtualPath)
 }
 
+// ImportBatch refreshes the burst's single shared folder once. Plex already
+// scans directories rather than files, so every event in the burst would have
+// produced a byte-identical refresh; coalescing collapses N of them into the
+// one request Plex was going to act on anyway. Nothing about the payload
+// changes for this target.
+func (t *plexTarget) ImportBatch(ctx context.Context, b importBatch) {
+	if len(b.files) == 0 {
+		return
+	}
+	t.refreshDirs(ctx, "import", b.files[0])
+}
+
 func (t *plexTarget) Delete(ctx context.Context, _ /*mediaType*/, virtualPath string) {
 	t.refreshDirs(ctx, "delete", virtualPath)
 }

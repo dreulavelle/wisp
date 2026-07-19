@@ -56,6 +56,23 @@ func (t *mediaBrowserTarget) Import(ctx context.Context, _ /*mediaType*/, virtua
 	})
 }
 
+// ImportBatch sends a coalesced burst as one request carrying every exact file
+// path. Library/Media/Updated takes a list natively, so this target needs no
+// folder-scoping: the server is told precisely as much about each individual
+// file as before, just in one request instead of N.
+func (t *mediaBrowserTarget) ImportBatch(ctx context.Context, b importBatch) {
+	if len(b.files) == 0 {
+		return
+	}
+	updates := make([]mediaUpdate, 0, len(b.files))
+	for _, f := range b.files {
+		updates = append(updates, mediaUpdate{
+			Path: fullPath(t.cfg.mountPath, f), UpdateType: t.cfg.createType,
+		})
+	}
+	t.send(ctx, "import", updates)
+}
+
 func (t *mediaBrowserTarget) Rename(ctx context.Context, _ /*mediaType*/, previousPath, newPath string) {
 	t.send(ctx, "rename", []mediaUpdate{
 		{Path: fullPath(t.cfg.mountPath, previousPath), UpdateType: "Deleted"},
