@@ -20,10 +20,17 @@ import (
 func (a *app) Pin(ctx context.Context, t monitor.Target) (monitor.PinOutcome, error) {
 	if a.lazyResolution {
 		wantQuality := library.NormalizeQuality(t.Quality)
-		ids := library.IDs{IMDb: t.IMDbID, TMDb: t.TMDbID, TVDb: t.TVDbID}
+		if wantQuality == "" {
+			wantQuality = "1080p"
+		}
+		searchID := t.IMDbID
+		if searchID == "" && t.TMDbID != "" {
+			searchID = "tmdb:" + t.TMDbID
+		}
+		ids := library.IDs{IMDb: searchID, TMDb: t.TMDbID, TVDb: t.TVDbID}
 		root := t.Category
 		if root == "" {
-			root = a.inheritCategory(ctx, t.IMDbID, t.MediaType)
+			root = a.inheritCategory(ctx, searchID, t.MediaType)
 		}
 
 		ext := ".mkv"
@@ -35,7 +42,7 @@ func (a *app) Pin(ctx context.Context, t monitor.Target) (monitor.PinOutcome, er
 		}
 
 		pin := store.Pin{
-			MediaType: t.MediaType, IMDbID: t.IMDbID, TMDbID: ids.TMDb, TVDbID: ids.TVDb,
+			MediaType: t.MediaType, IMDbID: searchID, TMDbID: ids.TMDb, TVDbID: ids.TVDb,
 			Category: root, Season: t.Season, Episode: t.Episode,
 			Title: t.Title, Year: t.Year, Quality: wantQuality, VirtualPath: vpath,
 			SourceURL:  "",

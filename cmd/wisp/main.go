@@ -201,7 +201,7 @@ type app struct {
 	// each other. The network resolve runs outside it.
 	pinMu          sync.Mutex
 	wsClientsMu    sync.Mutex
-	wsClients      map[*websocket.Conn]bool
+	wsClients      map[*websocket.Conn]chan []byte
 	lazyResolution bool
 }
 
@@ -776,20 +776,42 @@ type wsPinMessage struct {
 }
 
 func (a *app) handleWS(ws *websocket.Conn) {
+	ch := make(chan []byte, 256)
 	a.wsClientsMu.Lock()
 	if a.wsClients == nil {
-		a.wsClients = make(map[*websocket.Conn]bool)
+		a.wsClients = make(map[*websocket.Conn]chan []byte)
 	}
-	a.wsClients[ws] = true
+	a.wsClients[ws] = ch
 	a.wsClientsMu.Unlock()
 	a.log.Info("ws client connected", "remote", ws.Request().RemoteAddr)
 
+	ctx, cancel := context.WithCancel(context.Background())
 	defer func() {
+		cancel()
 		a.wsClientsMu.Lock()
 		delete(a.wsClients, ws)
 		a.wsClientsMu.Unlock()
 		ws.Close()
 		a.log.Info("ws client disconnected", "remote", ws.Request().RemoteAddr)
+	}()
+
+	// Start a writer goroutine that serializes writes to the WebSocket connection
+	go func() {
+		for {
+			select {
+			case payload, ok := <-ch:
+				if !ok {
+					return
+				}
+				if err := websocket.Message.Send(ws, string(payload)); err != nil {
+					a.log.Debug("failed to send ws message", "remote", ws.Request().RemoteAddr, "error", err)
+					ws.Close()
+					return
+				}
+			case <-ctx.Done():
+				return
+			}
+		}
 	}()
 
 	var msg string
@@ -820,12 +842,11 @@ func (a *app) broadcastPinCompleted(mediaType, imdb, tmdb, tvdb, vpath string) {
 		return
 	}
 	a.log.Debug("broadcasting ws pin_completed", "path", vpath, "clients", len(a.wsClients))
-	for ws := range a.wsClients {
-		go func(conn *websocket.Conn) {
-			if err := websocket.Message.Send(conn, string(payload)); err != nil {
-				a.log.Debug("failed to send ws message", "remote", conn.Request().RemoteAddr, "error", err)
-				conn.Close()
-			}
-		}(ws)
+	for _, ch := range a.wsClients {
+		select {
+		case ch <- payload:
+		default:
+			a.log.Warn("ws client channel full, dropping message")
+		}
 	}
 }

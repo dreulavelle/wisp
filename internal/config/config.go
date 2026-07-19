@@ -135,7 +135,7 @@ func Load() (*Config, error) {
 		ProbeConcurrency:     clampInt(intEnv("WISP_PROBE_CONCURRENCY", 8), 1, 32),
 		ProbeWindow:          clampInt(intEnv("WISP_PROBE_WINDOW", 3), 1, 8),
 		ProbeTimeout:         clampDuration(durationEnv("WISP_PROBE_TIMEOUT", 10*time.Second), 2*time.Second, 30*time.Second),
-		LazyResolution:       boolEnv("WISP_LAZY_RESOLUTION", true),
+		LazyResolution:       boolEnv("WISP_LAZY_RESOLUTION", false),
 	}
 	if c.AIOStreamsURL == "" {
 		return nil, fmt.Errorf("WISP_AIOSTREAMS_URL is required")

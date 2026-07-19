@@ -211,13 +211,6 @@ func (s *Server) serveDir(w http.ResponseWriter, r *http.Request, rel string) {
 }
 
 func (s *Server) serveFile(w http.ResponseWriter, r *http.Request, pin *store.Pin) {
-	if r.Method == http.MethodHead {
-		w.Header().Set("Content-Type", "video/x-matroska")
-		w.Header().Set("Accept-Ranges", "bytes")
-		w.Header().Set("Content-Length", fmt.Sprintf("%d", pin.Size))
-		return
-	}
-
 	if pin.SourceURL == "" {
 		if s.reresolve != nil {
 			s.log.Warn("placeholder pin requested; resolving", "path", pin.VirtualPath)
@@ -231,6 +224,13 @@ func (s *Server) serveFile(w http.ResponseWriter, r *http.Request, pin *store.Pi
 			http.Error(w, "no resolver configured for placeholder", http.StatusInternalServerError)
 			return
 		}
+	}
+
+	if r.Method == http.MethodHead {
+		w.Header().Set("Content-Type", "video/x-matroska")
+		w.Header().Set("Accept-Ranges", "bytes")
+		w.Header().Set("Content-Length", fmt.Sprintf("%d", pin.Size))
+		return
 	}
 
 	s.reqServed.Add(1)
