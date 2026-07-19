@@ -410,7 +410,7 @@ func TestSeriesResolvesEpisodesWithBoundedConcurrency(t *testing.T) {
 	m.resolveConcurrency = limit
 
 	start := time.Now()
-	res := m.processSeries(context.Background(), seriesItem("tt7", "1080p"))
+	res := m.processSeries(context.Background(), seriesItem("tt7", "1080p"), false)
 	elapsed := time.Since(start)
 
 	if got := ful.calls.Load(); got != episodes {
@@ -450,7 +450,7 @@ func TestSeriesAggregateMatchesSequential(t *testing.T) {
 		now := date("2026-06-01T00:00:00Z")
 		m, _ := testMonitor(t, seriesEpisodesMux("tt7", 6), ful, now)
 		m.resolveConcurrency = limit
-		return m.processSeries(context.Background(), seriesItem("tt7", "1080p")).pendingAired
+		return m.processSeries(context.Background(), seriesItem("tt7", "1080p"), false).pendingAired
 	}
 
 	seq := run(1)
@@ -473,7 +473,7 @@ func TestSeriesEpisodeErrorDoesNotAbortOthers(t *testing.T) {
 	m, _ := testMonitor(t, seriesEpisodesMux("tt7", 6), ful, now)
 	m.resolveConcurrency = 4
 
-	res := m.processSeries(context.Background(), seriesItem("tt7", "1080p"))
+	res := m.processSeries(context.Background(), seriesItem("tt7", "1080p"), false)
 
 	if got := ful.calls.Load(); got != 6 {
 		t.Fatalf("Pin calls = %d, want 6 (error must not short-circuit the season)", got)
@@ -512,16 +512,20 @@ func TestTierBackoffAccruesAndCaps(t *testing.T) {
 	ctx := context.Background()
 	ful := newFakeFul()
 	ful.noQuality["2160p"] = true // no 4K rips exist for this title
-	now := date("2026-06-01T00:00:00Z")
-	m, _ := testMonitor(t, movieReleaseMux("500"), ful, now) // interval = 1h
-	m.tierBackoffMax = 5 * time.Hour                         // cap after a few doublings
+	clock := date("2026-06-01T00:00:00Z")
+	m, _ := testMonitor(t, movieReleaseMux("500"), ful, clock) // interval = 1h
+	m.now = func() time.Time { return clock }
+	m.tierBackoffMax = 5 * time.Hour // cap after a few doublings
 
 	item := movieItem("tt5", "500", "1080p", "2160p")
 
-	// The exponential ramp from the 1h base, capped at 5h: 1h, 2h, 4h, 5h, 5h, …
+	// Each pass runs at the tier's due moment (the clock is advanced to the prior
+	// NextTry between passes), so the tier is genuinely attempted and its miss
+	// streak advances. The exponential ramp from the 1h base, capped at 5h: 1h, 2h,
+	// 4h, 5h, 5h, … — the backoff a saturated tier settles into.
 	wantDelays := []time.Duration{time.Hour, 2 * time.Hour, 4 * time.Hour, 5 * time.Hour, 5 * time.Hour}
 	for pass, want := range wantDelays {
-		res := m.processMovie(ctx, item)
+		res := m.processMovie(ctx, item, false)
 		st, ok := res.tierBackoff["2160p"]
 		if !ok {
 			t.Fatalf("pass %d: 2160p tier not backed off; map=%v", pass+1, res.tierBackoff)
@@ -529,28 +533,75 @@ func TestTierBackoffAccruesAndCaps(t *testing.T) {
 		if st.Misses != pass+1 {
 			t.Fatalf("pass %d: misses = %d, want %d", pass+1, st.Misses, pass+1)
 		}
-		if wantNext := now.Add(want); !st.NextTry.Equal(wantNext) {
+		if wantNext := clock.Add(want); !st.NextTry.Equal(wantNext) {
 			t.Fatalf("pass %d: NextTry = %v, want now+%v", pass+1, st.NextTry, want)
 		}
 		// Every remaining target is the absent tier → DueAt follows the tier schedule.
 		if res.reason != store.DueReasonTierBackoff {
 			t.Fatalf("pass %d: reason = %q, want %q", pass+1, res.reason, store.DueReasonTierBackoff)
 		}
-		if wantDue := now.Add(want); !res.due.Equal(wantDue) {
+		if wantDue := clock.Add(want); !res.due.Equal(wantDue) {
 			t.Fatalf("pass %d: due = %v, want now+%v", pass+1, res.due, want)
 		}
 		item.TierBackoff = res.tierBackoff // thread state forward (persistResult would)
+		clock = st.NextTry                 // advance to the tier's deadline for the next pass
 	}
 
 	// 4K rips finally appear → a successful pin of 2160p resets the tier: both tiers
 	// pin, the movie completes, and no backoff state lingers.
 	ful.noQuality["2160p"] = false
-	res := m.processMovie(ctx, item)
+	res := m.processMovie(ctx, item, false)
 	if !res.completed {
 		t.Fatalf("movie should complete once every tier pins; res=%#v", res)
 	}
 	if _, ok := res.tierBackoff["2160p"]; ok {
 		t.Fatalf("2160p backoff must reset on a successful pin; map=%v", res.tierBackoff)
+	}
+}
+
+// A tier in backoff (NextTry in the future) must NOT be attempted when the title
+// wakes for another reason — its miss streak must not advance and Pin must not be
+// called for it — yet a forced refresh must still attempt it.
+func TestBackedOffTierNotAttemptedUntilDeadline(t *testing.T) {
+	ctx := context.Background()
+	ful := newFakeFul()
+	ful.noQuality["2160p"] = true     // 4K absent (will back off)
+	ful.noStream[[2]int{1, 2}] = true // E2's 1080p has no stream yet → the title keeps waking fast
+	now := date("2026-06-01T00:00:00Z")
+	m, _ := testMonitor(t, seriesEpisodesMux("tt7", 3), ful, now)
+	m.resolveConcurrency = 4
+
+	// 2160p already saturated: backed off with a far-future NextTry and a real streak.
+	item := seriesItem("tt7", "1080p", "2160p")
+	item.TierBackoff = map[string]store.TierBackoffState{"2160p": {Misses: 4, NextTry: now.Add(24 * time.Hour)}}
+
+	res := m.processSeries(ctx, item, false)
+
+	// The 2160p tier is still in backoff → skipped, not attempted: its streak holds
+	// at 4 and its NextTry is unchanged.
+	st := res.tierBackoff["2160p"]
+	if st.Misses != 4 || !st.NextTry.Equal(now.Add(24*time.Hour)) {
+		t.Fatalf("backed-off tier advanced without force: %#v", st)
+	}
+	// Pin was called only for the 1080p tier of the 3 episodes (E1,E2,E3), never for
+	// 2160p (3 calls, not 6).
+	if ful.calls != 3 {
+		t.Fatalf("Pin calls = %d, want 3 (2160p must not be attempted while backed off)", ful.calls)
+	}
+	// A normal tier (E2's 1080p) still pends → the title stays on the fast cadence.
+	if res.reason != store.DueReasonRetry || !res.due.Equal(now.Add(time.Hour)) {
+		t.Fatalf("due = %v (%s), want the fast interval retry", res.due, res.reason)
+	}
+
+	// A forced refresh overrides the tier backoff and re-attempts 2160p for every
+	// episode (3 × 2160p = 3 more calls, plus 1080p re-checks).
+	before := ful.calls
+	forced := m.processSeries(ctx, item, true)
+	if got := ful.calls - before; got < 3 {
+		t.Fatalf("forced refresh attempted %d new pins, want ≥3 (2160p re-tried for all episodes)", got)
+	}
+	if fst := forced.tierBackoff["2160p"]; fst.Misses != 5 {
+		t.Fatalf("forced 2160p misses = %d, want 5 (streak advanced under force)", fst.Misses)
 	}
 }
 
@@ -563,7 +614,7 @@ func TestNoResultsDoesNotAccrueTierBackoff(t *testing.T) {
 	now := date("2026-06-01T00:00:00Z")
 	m, _ := testMonitor(t, movieReleaseMux("500"), ful, now) // interval = 1h
 
-	res := m.processMovie(ctx, movieItem("tt5", "500", "2160p"))
+	res := m.processMovie(ctx, movieItem("tt5", "500", "2160p"), false)
 
 	if len(res.tierBackoff) != 0 {
 		t.Fatalf("NoResults must not back off any tier; map=%v", res.tierBackoff)
@@ -590,7 +641,7 @@ func TestSeriesDueDrivenByBackedOffTier(t *testing.T) {
 	item := seriesItem("tt7", "1080p", "2160p")
 	item.TierBackoff = map[string]store.TierBackoffState{"2160p": {Misses: 5, NextTry: now}}
 
-	res := m.processSeries(ctx, item)
+	res := m.processSeries(ctx, item, false)
 
 	// 1080p pins for all four → only 2160p remains, unanimously absent → backed off.
 	st := res.tierBackoff["2160p"]
@@ -620,7 +671,7 @@ func TestSeriesNormalTierKeepsFastCadence(t *testing.T) {
 	item := seriesItem("tt7", "1080p", "2160p")
 	item.TierBackoff = map[string]store.TierBackoffState{"2160p": {Misses: 5, NextTry: now}}
 
-	res := m.processSeries(ctx, item)
+	res := m.processSeries(ctx, item, false)
 
 	// A normal (1080p) target still pending → fast cadence at now+interval, NOT the
 	// far 2160p tier schedule.
@@ -648,7 +699,7 @@ func TestTierTallyConcurrencySafe(t *testing.T) {
 	m, _ := testMonitor(t, seriesEpisodesMux("tt7", 12), ful, now)
 	m.resolveConcurrency = 8
 
-	res := m.processSeries(ctx, seriesItem("tt7", "1080p", "2160p"))
+	res := m.processSeries(ctx, seriesItem("tt7", "1080p", "2160p"), false)
 
 	if st, ok := res.tierBackoff["2160p"]; !ok || st.Misses != 1 {
 		t.Fatalf("2160p backoff = %#v (ok=%v), want misses=1", res.tierBackoff["2160p"], ok)
@@ -674,12 +725,41 @@ func TestPartialTierAbsenceDoesNotBackOff(t *testing.T) {
 	m, _ := testMonitor(t, seriesEpisodesMux("tt7", 4), ful, now)
 	m.resolveConcurrency = 4
 
-	res := m.processSeries(ctx, seriesItem("tt7", "2160p"))
+	res := m.processSeries(ctx, seriesItem("tt7", "2160p"), false)
 
 	if len(res.tierBackoff) != 0 {
 		t.Fatalf("partial absence must not back off (E1 has 2160p); map=%v", res.tierBackoff)
 	}
 	if res.reason != store.DueReasonRetry {
 		t.Fatalf("reason = %q, want fast retry %q", res.reason, store.DueReasonRetry)
+	}
+}
+
+// An idempotent re-request of an existing title must preserve its per-tier backoff
+// streak — otherwise a repeated intake would reset an absent tier to Misses==0 and
+// defeat the exponential backoff.
+func TestIntakePreservesTierBackoff(t *testing.T) {
+	ctx := context.Background()
+	m, st := testMonitor(t, http.NewServeMux(), newFakeFul(), date("2026-06-01T00:00:00Z"))
+
+	seed := store.Monitored{
+		Key: "movie:tt5", MediaType: "movie", IMDbID: "tt5", TMDbID: "500",
+		Title: "Film", Qualities: []string{"2160p"}, Enabled: true,
+		Category:    library.Root("movie", false),
+		TierBackoff: map[string]store.TierBackoffState{"2160p": {Misses: 3, NextTry: date("2026-06-05T00:00:00Z")}},
+	}
+	if err := st.PutMonitored(ctx, seed); err != nil {
+		t.Fatal(err)
+	}
+
+	// Re-post the same title (a feeder re-requesting is idempotent).
+	if err := m.Intake(ctx, Request{MediaType: "movie", IMDbID: "tt5", TMDbID: "500", Title: "Film", Qualities: []string{"2160p"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, _ := st.GetMonitored(ctx, "movie:tt5")
+	tb, ok := got.TierBackoff["2160p"]
+	if !ok || tb.Misses != 3 || !tb.NextTry.Equal(date("2026-06-05T00:00:00Z")) {
+		t.Fatalf("re-request reset the tier streak: %#v", got.TierBackoff)
 	}
 }
