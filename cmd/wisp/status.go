@@ -24,6 +24,7 @@ const (
 type requestStatus struct {
 	State           string   `json:"state"`
 	PinnedQualities []string `json:"pinned_qualities"`
+	PinnedPaths     []string `json:"pinned_paths,omitempty"`
 	Detail          string   `json:"detail"`
 	RequestRef      string   `json:"request_ref,omitempty"`
 }
@@ -143,7 +144,7 @@ func computeRequestStatus(mon *store.Monitored, pins []store.Pin, mediaType stri
 		mt = pins[0].MediaType
 	}
 
-	st := requestStatus{PinnedQualities: pinnedQualities(pins)}
+	st := requestStatus{PinnedQualities: pinnedQualities(pins), PinnedPaths: pinnedPaths(pins)}
 	if mon != nil {
 		st.RequestRef = mon.RequestRef
 	}
@@ -221,6 +222,17 @@ func pinnedQualities(pins []store.Pin) []string {
 		}
 	}
 	sort.Strings(out)
+	return out
+}
+
+// pinnedPaths returns the virtual paths of the pins.
+func pinnedPaths(pins []store.Pin) []string {
+	var out []string
+	for _, p := range pins {
+		if p.VirtualPath != "" {
+			out = append(out, p.VirtualPath)
+		}
+	}
 	return out
 }
 

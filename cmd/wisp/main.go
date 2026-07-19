@@ -27,6 +27,7 @@ import (
 	"github.com/dreulavelle/wisp/internal/server"
 	"github.com/dreulavelle/wisp/internal/store"
 	"github.com/rclone/rclone/fs"
+	"golang.org/x/net/websocket"
 )
 
 func main() {
@@ -102,6 +103,7 @@ func main() {
 	mux.HandleFunc("GET /api/schedule", app.handleSchedule)
 	mux.HandleFunc("GET /api/requests/status", app.handleRequestStatus)
 	mux.HandleFunc("GET /api/status", app.handleStatus)
+	mux.Handle("GET /api/ws", websocket.Handler(app.handleWS))
 	mux.HandleFunc("GET /metrics", app.handleMetrics)
 	mux.HandleFunc("GET /api/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -192,7 +194,9 @@ type app struct {
 	// pinMu serializes the store-mutation half of pin() (list → upsert → delete
 	// of superseded pins) so concurrent pins — API and scheduler — can't clobber
 	// each other. The network resolve runs outside it.
-	pinMu sync.Mutex
+	pinMu       sync.Mutex
+	wsClientsMu sync.Mutex
+	wsClients   map[*websocket.Conn]bool
 }
 
 type addRequest struct {
@@ -406,6 +410,7 @@ func (a *app) pin(ctx context.Context, s pinSpec) (vpath string, size int64, err
 	if len(renamedPaths) == 0 {
 		a.webhook.Import(ctx, s.MediaType, vpath)
 	}
+	a.broadcastPinCompleted(s.MediaType, searchID, ids.TMDb, ids.TVDb, vpath)
 	return vpath, size, nil
 }
 
@@ -753,4 +758,68 @@ func contentRangeSize(value string) (int64, error) {
 		return 0, fmt.Errorf("upstream returned invalid Content-Range %q", value)
 	}
 	return size, nil
+}
+
+type wsPinMessage struct {
+	Event       string `json:"event"`
+	MediaType   string `json:"media_type"`
+	IMDbID      string `json:"imdb_id"`
+	TMDbID      string `json:"tmdb_id"`
+	TVDbID      string `json:"tvdb_id"`
+	VirtualPath string `json:"virtual_path"`
+}
+
+func (a *app) handleWS(ws *websocket.Conn) {
+	a.wsClientsMu.Lock()
+	if a.wsClients == nil {
+		a.wsClients = make(map[*websocket.Conn]bool)
+	}
+	a.wsClients[ws] = true
+	a.wsClientsMu.Unlock()
+	a.log.Info("ws client connected", "remote", ws.Request().RemoteAddr)
+
+	defer func() {
+		a.wsClientsMu.Lock()
+		delete(a.wsClients, ws)
+		a.wsClientsMu.Unlock()
+		ws.Close()
+		a.log.Info("ws client disconnected", "remote", ws.Request().RemoteAddr)
+	}()
+
+	var msg string
+	for {
+		if err := websocket.Message.Receive(ws, &msg); err != nil {
+			break
+		}
+	}
+}
+
+func (a *app) broadcastPinCompleted(mediaType, imdb, tmdb, tvdb, vpath string) {
+	a.wsClientsMu.Lock()
+	defer a.wsClientsMu.Unlock()
+	if len(a.wsClients) == 0 {
+		return
+	}
+	msg := wsPinMessage{
+		Event:       "pin_completed",
+		MediaType:   mediaType,
+		IMDbID:      imdb,
+		TMDbID:      tmdb,
+		TVDbID:      tvdb,
+		VirtualPath: vpath,
+	}
+	payload, err := json.Marshal(msg)
+	if err != nil {
+		a.log.Error("failed to marshal ws message", "error", err)
+		return
+	}
+	a.log.Debug("broadcasting ws pin_completed", "path", vpath, "clients", len(a.wsClients))
+	for ws := range a.wsClients {
+		go func(conn *websocket.Conn) {
+			if err := websocket.Message.Send(conn, string(payload)); err != nil {
+				a.log.Debug("failed to send ws message", "remote", conn.Request().RemoteAddr, "error", err)
+				conn.Close()
+			}
+		}(ws)
+	}
 }
