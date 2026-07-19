@@ -33,14 +33,40 @@ server, AIOStreams). wisp only makes a remote stream look like a local file.
 2. **Pin** — wisp stores `{virtual_path, source_url, size, …}` in bbolt. The
    `source_url` is the AIOStreams/torrentio resolver permalink — it re-unlocks
    the debrid link on every request, so it doesn't go stale between plays.
-3. **Appear** — the pin projects into a `movies/…` or `shows/…/Season NN/…`
-   layout. The embedded rclone mount exposes it as a real file with the pinned
-   size (so `stat`/scan is instant — no bytes pulled).
+3. **Appear** — the pin projects into one of the four category roots (e.g.
+   `movies/…` or `anime_shows/…/Season NN/…` — see [Library layout](#library-layout)).
+   The embedded rclone mount exposes it as a real file with the pinned size (so
+   `stat`/scan is instant — no bytes pulled).
 4. **Play** — when the media server opens the file, wisp resolves the permalink
    to its CDN URL (cached after the first read — see Performance below) and
    range-proxies the requested bytes. Because these are **real bytes**, the media
    server runs real `ffprobe` (true codecs, duration, subtitles) and owns
    playback: direct play, transcode, and arbitrary seeking all work.
+
+## Library layout
+
+wisp presents four category roots under the mount — `movies/`, `shows/`,
+`anime_movies/`, `anime_shows/` — and always shows all four, even when empty, so
+a media server can validate every library path from a fresh install. Point the
+media server at all four, one library per root.
+
+A title's **category is decided once and is permanent**: it's stored on the title
+and on every pin, and never re-derived (the root is part of each file's on-disk
+path, so moving it would orphan the files). A conflicting later request keeps the
+first category and logs a warning; re-categorizing an existing title is out of
+scope for now.
+
+Anime is decided in order:
+
+1. If the title already has pins, their root is inherited — a later flag never
+   splits a title across roots (first writer wins).
+2. An explicit `is_anime` flag on the request wins next (e.g. from Silo). It's
+   resolved immediately, so `/api/add` never blocks.
+3. Otherwise the scheduler resolves it on its first pass, *before anything is
+   pinned*, from a conservative heuristic over the Cinemeta metadata wisp already
+   fetches: the **Animation** genre **and** a Japanese original language/country.
+   Western animation and any title without a Japanese signal stay non-anime.
+4. With no signal, the title defaults to non-anime.
 
 ## The self-heal model
 
