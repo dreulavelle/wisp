@@ -198,13 +198,20 @@ func TestLazyResolutionUpgradeRetiresPlaceholder(t *testing.T) {
 	}
 }
 
-// recordingNotifier captures Rename calls; Import/Delete are no-ops. Unlike the
-// real notifier it delivers synchronously, so a test never races the fanout.
+// recordingNotifier captures Import and Rename calls; Delete is a no-op. Unlike
+// the real notifier it delivers synchronously, so a test never races the fanout.
+// A nil channel means the test doesn't care about that event.
 type recordingNotifier struct {
+	imports chan [2]string
 	renames chan [2]string
 }
 
-func (n recordingNotifier) Import(context.Context, string, string) {}
+func (n recordingNotifier) Import(_ context.Context, mediaType, virtualPath string) {
+	select {
+	case n.imports <- [2]string{mediaType, virtualPath}:
+	default:
+	}
+}
 func (n recordingNotifier) Rename(_ context.Context, _, previousPath, newPath string) {
 	select {
 	case n.renames <- [2]string{previousPath, newPath}:

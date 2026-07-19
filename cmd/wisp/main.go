@@ -657,6 +657,22 @@ func (a *app) reResolve(ctx context.Context, p *store.Pin) error {
 	// flaky upstream can self-heal repeatedly within one playback.
 	if placeholder {
 		a.broadcastPinCompleted(p.MediaType, p.IMDbID, p.TMDbID, p.TVDbID, p.VirtualPath)
+		// The WebSocket event is the forward-looking channel; the ARR webhook is
+		// the one media servers actually consume today, and it is what the eager
+		// pin already uses. Without it an on-demand resolve leaves the catalog
+		// holding the 1-byte placeholder size indefinitely.
+		//
+		// Import, not Rename: the virtual path is unchanged, so there is nothing
+		// to rename. This re-announces the same path the placeholder was
+		// announced under when it was created, which is exactly the idempotent
+		// "scan this path" trigger an Autoscan-style consumer expects.
+		//
+		// The context is detached because reResolve is driven from an HTTP
+		// request whose context dies the moment the player hangs up — plausibly
+		// right after it triggers resolution. Delivery is best-effort and
+		// asynchronous inside the notifier, so a down media server cannot stall
+		// or fail playback.
+		a.webhook.Import(context.WithoutCancel(ctx), p.MediaType, p.VirtualPath)
 	}
 	return nil
 }
