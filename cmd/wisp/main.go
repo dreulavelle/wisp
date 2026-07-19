@@ -108,6 +108,7 @@ func main() {
 	mux.HandleFunc("GET /api/schedule", app.handleSchedule)
 	mux.HandleFunc("GET /api/requests/status", app.handleRequestStatus)
 	mux.HandleFunc("GET /api/status", app.handleStatus)
+	mux.HandleFunc("GET /api/health", app.handleHealth)
 	mux.Handle("GET /api/ws", websocket.Handler(app.handleWS))
 	mux.HandleFunc("GET /metrics", app.handleMetrics)
 	mux.HandleFunc("GET /api/healthz", func(w http.ResponseWriter, _ *http.Request) {
@@ -220,6 +221,9 @@ type app struct {
 	// wsReadTimeoutOverride shortens the WebSocket idle eviction window; zero
 	// means defaultWSReadTimeout. Only tests set it.
 	wsReadTimeoutOverride time.Duration
+	// mountHealthyOverride stubs the FUSE mount probe, which is otherwise
+	// unreachable without a real mount. Only tests set it.
+	mountHealthyOverride func() bool
 }
 
 type addRequest struct {
@@ -547,6 +551,55 @@ func (a *app) deleteMountedPin(ctx context.Context, path string) error {
 		return fs.ErrorObjectNotFound
 	}
 	return nil
+}
+
+// mountHealthy reports whether the embedded FUSE mount is live.
+func (a *app) mountHealthy() bool {
+	if a.mountHealthyOverride != nil {
+		return a.mountHealthyOverride()
+	}
+	return a.mnt.Healthy()
+}
+
+// handleHealth is the container readiness endpoint: 200 healthy, 503 not. The
+// status code is the whole contract — a Docker healthcheck sees only the exit
+// code of `wget --spider` — so the body exists purely for a human curling it.
+//
+// What counts as healthy is deliberately narrow, and config-dependent:
+//
+//   - Reaching this handler at all already proves the HTTP server is serving,
+//     which is most of what a dependent container is waiting on.
+//   - When wisp mounts the library itself (WISP_MOUNT_PATH set), a live FUSE
+//     mount is a genuine precondition. An alive-but-unmounted wisp would let a
+//     media server start scanning an empty mountpoint — the exact failure this
+//     gates against — so that case reports 503.
+//   - In HTTP-only mode the operator mounts externally and wisp has no mount to
+//     report on. Requiring one there would wedge the endpoint at 503 forever,
+//     so mount state is simply not part of the verdict.
+//
+// It deliberately touches nothing else. No network dependency (AIOStreams,
+// TMDb): an upstream outage must not mark wisp unhealthy, because already
+// pinned files still serve fine. And no store read: bbolt's Stats() walks the
+// bucket's pages, which is not worth repeating every 10s for the life of the
+// process, and a store fault is not a condition that restarting the container
+// or holding back its dependents would fix.
+func (a *app) handleHealth(w http.ResponseWriter, _ *http.Request) {
+	selfMount := a.mountPath != ""
+	mounted := a.mountHealthy()
+	healthy := !selfMount || mounted
+
+	body := map[string]any{"status": "ok", "self_mount": selfMount}
+	if selfMount {
+		// Booleans only: /api/status already exposes strictly more than this.
+		body["mounted"] = mounted
+	}
+	code := http.StatusOK
+	if !healthy {
+		code, body["status"] = http.StatusServiceUnavailable, "mount_down"
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	_ = json.NewEncoder(w).Encode(body)
 }
 
 func (a *app) handleStatus(w http.ResponseWriter, r *http.Request) {
