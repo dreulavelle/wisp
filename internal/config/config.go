@@ -22,6 +22,13 @@ type Config struct {
 	ListenAddr string
 	// DBPath is where the pin database lives.
 	DBPath string
+	// APIToken, when set, requires `Authorization: Bearer <token>` on the
+	// control-plane endpoints (everything under /api/ except the health probes,
+	// plus /metrics). Empty — the default — disables authentication entirely and
+	// serves the API to anyone who can reach the port, which is how wisp has
+	// always behaved; existing deployments are unaffected by upgrading. The file
+	// -serving data plane is never gated (see cmd/wisp newMux).
+	APIToken string
 	// SiloWebhookURL is the deprecated alias for NotifyArrWebhookURL
 	// (WISP_SILO_WEBHOOK_URL). It still works; the canonical name wins if both
 	// are set.
@@ -120,6 +127,7 @@ func Load() (*Config, error) {
 		AIOStreamsPassword:   os.Getenv("WISP_AIOSTREAMS_PASSWORD"),
 		ListenAddr:           envOr("WISP_LISTEN_ADDR", ":8080"),
 		DBPath:               envOr("WISP_DB_PATH", "/data/wisp.db"),
+		APIToken:             strings.TrimSpace(os.Getenv("WISP_API_TOKEN")),
 		SiloWebhookURL:       strings.TrimSpace(os.Getenv("WISP_SILO_WEBHOOK_URL")),
 		NotifyArrWebhookURL:  strings.TrimSpace(os.Getenv("WISP_NOTIFY_ARR_WEBHOOK_URL")),
 		NotifyJellyfinURL:    strings.TrimSpace(os.Getenv("WISP_NOTIFY_JELLYFIN_URL")),
