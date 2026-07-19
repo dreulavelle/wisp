@@ -120,6 +120,10 @@ type Multi struct {
 	log       *slog.Logger
 }
 
+// MountPath returns the library root that virtual paths are resolved against,
+// after the default has been applied (for startup logging).
+func (m *Multi) MountPath() string { return m.mountPath }
+
 // Targets returns the names of the configured targets (for startup logging).
 func (m *Multi) Targets() []string {
 	names := make([]string, 0, len(m.targets))

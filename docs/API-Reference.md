@@ -26,6 +26,8 @@ Resolve a title via AIOStreams, pin the top stream, and create its virtual file.
 
 **Responses**
 
+- `202` → `{"monitoring":true,"state":"queued"}` for request-shaped intake (`qualities`, `request_ref`, or `is_anime` present). Wisp schedules release-aware placeholder creation immediately; each placeholder pin has size 1 and resolves through AIOStreams on first playback.
+
 - `200` → `{"virtual_path": "...", "size": 1471496964}` — pinned.
 - `4xx/5xx` → `{"error": "<code>", "message": "..."}` — a structured code so a
   feeder can distinguish a genuine no-stream condition from a

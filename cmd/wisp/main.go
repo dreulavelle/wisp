@@ -59,10 +59,14 @@ func main() {
 		JellyfinURL:    cfg.NotifyJellyfinURL, JellyfinAPIKey: cfg.NotifyJellyfinAPIKey,
 		EmbyURL: cfg.NotifyEmbyURL, EmbyAPIKey: cfg.NotifyEmbyAPIKey,
 		PlexURL: cfg.NotifyPlexURL, PlexToken: cfg.NotifyPlexToken,
-		MountPath: cfg.MountPath,
+		MountPath: cfg.NotifyMountPath,
 	}, log)
 	if targets := notifier.Targets(); len(targets) > 0 {
 		log.Info("media-server notifications enabled", "targets", targets)
+	}
+	if cfg.NotifyMountPathDefaulted {
+		log.Warn("DEPRECATED: notification targets are configured but neither WISP_NOTIFY_MOUNT_PATH nor WISP_MOUNT_PATH is set; falling back to the built-in default library root. Set WISP_NOTIFY_MOUNT_PATH to the path your media server sees — relying on the default is deprecated and will become an error in a future major version",
+			"default_mount_path", notifier.MountPath())
 	}
 
 	aio := aiostreams.New(cfg.AIOStreamsURL, cfg.AIOStreamsPassword)

@@ -127,6 +127,66 @@ func TestLoadProbeDefaultsAndClamps(t *testing.T) {
 	}
 }
 
+// Notifications configured without any mount path must keep starting — the
+// notifier's /mnt/wisp default carries the deployment — but Load has to flag it
+// so main can emit the deprecation warning.
+func TestLoadDefaultsNotificationMountPath(t *testing.T) {
+	t.Setenv("WISP_AIOSTREAMS_URL", "https://host/stremio/uuid/blob/manifest.json")
+	t.Setenv("WISP_NOTIFY_ARR_WEBHOOK_URL", "https://silo/autoscan")
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("notifications without a mount path must not fail: %v", err)
+	}
+	if c.NotifyMountPath != "" {
+		t.Fatalf("NotifyMountPath = %q, want empty so notify applies its default", c.NotifyMountPath)
+	}
+	if !c.NotifyMountPathDefaulted {
+		t.Fatal("NotifyMountPathDefaulted = false, want true so the caller warns")
+	}
+
+	// An explicit value is honoured verbatim and must not be flagged.
+	t.Setenv("WISP_NOTIFY_MOUNT_PATH", "/silo/visible/wisp")
+	c, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.NotifyMountPath != "/silo/visible/wisp" {
+		t.Fatalf("NotifyMountPath = %q", c.NotifyMountPath)
+	}
+	if c.NotifyMountPathDefaulted {
+		t.Fatal("NotifyMountPathDefaulted = true for an explicitly configured path")
+	}
+}
+
+// With no notification targets there is nothing to warn about, however the
+// mount paths are configured.
+func TestLoadDoesNotFlagMountPathWithoutNotifyTargets(t *testing.T) {
+	t.Setenv("WISP_AIOSTREAMS_URL", "https://host/stremio/uuid/blob/manifest.json")
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.NotifyMountPathDefaulted {
+		t.Fatal("NotifyMountPathDefaulted = true with no notification targets configured")
+	}
+}
+
+func TestLoadUsesExplicitSelfMountForNotifications(t *testing.T) {
+	t.Setenv("WISP_AIOSTREAMS_URL", "https://host/stremio/uuid/blob/manifest.json")
+	t.Setenv("WISP_NOTIFY_ARR_WEBHOOK_URL", "https://silo/autoscan")
+	t.Setenv("WISP_MOUNT_PATH", "/configured/wisp")
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.NotifyMountPath != "/configured/wisp" {
+		t.Fatalf("NotifyMountPath = %q", c.NotifyMountPath)
+	}
+	if c.NotifyMountPathDefaulted {
+		t.Fatal("NotifyMountPathDefaulted = true when WISP_MOUNT_PATH supplied the path")
+	}
+}
+
 func TestListEnv(t *testing.T) {
 	t.Setenv("WISP_TEST_LIST", " us , gb ,, jp ")
 	got := listEnv("WISP_TEST_LIST", []string{"X"})

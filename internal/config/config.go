@@ -41,6 +41,15 @@ type Config struct {
 	// per-folder partial scans.
 	NotifyPlexURL   string
 	NotifyPlexToken string
+	// NotifyMountPath is the absolute library root as seen by notification
+	// targets. Empty falls back to MountPath, and then to the notifier's
+	// historical /mnt/wisp default.
+	NotifyMountPath string
+	// NotifyMountPathDefaulted reports that notification targets are configured
+	// but neither WISP_NOTIFY_MOUNT_PATH nor WISP_MOUNT_PATH was set, so the
+	// notifier's built-in default is in play. Load has no logger, so the caller
+	// owns the deprecation warning.
+	NotifyMountPathDefaulted bool
 	// MountPath, when set, makes wisp self-mount the library there via the
 	// embedded rclone VFS. Empty = serve HTTP only (mount it yourself).
 	MountPath string
@@ -88,7 +97,7 @@ type Config struct {
 	// never eats the network budget. Clamped to [2s, 30s].
 	ProbeTimeout time.Duration
 
-	// LazyResolution, when enabled, creates placeholder pins with 0 size and empty URL
+	// LazyResolution, when enabled, creates placeholder pins with size 1 and an empty URL
 	// immediately when a title is monitored, allowing immediate media-server cataloging
 	// with stream resolution happening on-demand upon first playback request.
 	LazyResolution bool
@@ -112,6 +121,7 @@ func Load() (*Config, error) {
 		NotifyEmbyAPIKey:     strings.TrimSpace(os.Getenv("WISP_NOTIFY_EMBY_API_KEY")),
 		NotifyPlexURL:        strings.TrimSpace(os.Getenv("WISP_NOTIFY_PLEX_URL")),
 		NotifyPlexToken:      strings.TrimSpace(os.Getenv("WISP_NOTIFY_PLEX_TOKEN")),
+		NotifyMountPath:      strings.TrimSpace(os.Getenv("WISP_NOTIFY_MOUNT_PATH")),
 		MountPath:            strings.TrimSpace(os.Getenv("WISP_MOUNT_PATH")),
 		MountAllowOther:      boolEnv("WISP_MOUNT_ALLOW_OTHER", true),
 		LogLevel:             strings.ToLower(envOr("WISP_LOG_LEVEL", "info")),
@@ -130,7 +140,21 @@ func Load() (*Config, error) {
 	if c.AIOStreamsURL == "" {
 		return nil, fmt.Errorf("WISP_AIOSTREAMS_URL is required")
 	}
+	if c.NotifyMountPath == "" {
+		c.NotifyMountPath = c.MountPath
+	}
+	// Neither path is set but something wants notifying: the notifier's
+	// /mnt/wisp default carries the deployment. That default is deprecated and
+	// becomes an error in a future major, so flag it for the caller to warn on.
+	c.NotifyMountPathDefaulted = c.NotifyMountPath == "" && c.notifyEnabled()
 	return c, nil
+}
+
+// notifyEnabled reports whether at least one media-server notification target
+// is configured.
+func (c *Config) notifyEnabled() bool {
+	return c.NotifyArrWebhookURL != "" || c.SiloWebhookURL != "" ||
+		c.NotifyJellyfinURL != "" || c.NotifyEmbyURL != "" || c.NotifyPlexURL != ""
 }
 
 // durationEnv parses a Go duration like "2h" or "90m", falling back on empty or

@@ -9,6 +9,7 @@ All configuration is via environment variables.
 | `WISP_LISTEN_ADDR` | `:8080` | HTTP bind address. |
 | `WISP_DB_PATH` | `/data/wisp.db` | bbolt database for pins **and** monitors. Persist this (a volume) to keep your library and watchlist across restarts. |
 | `WISP_MOUNT_PATH` | — | If set, wisp self-mounts the library here (needs `/dev/fuse` + `SYS_ADMIN`). Unset = serve HTTP only and mount it yourself. |
+| `WISP_NOTIFY_MOUNT_PATH` | — | Absolute library root as seen by notification targets. Falls back to `WISP_MOUNT_PATH`, then to `/mnt/wisp`. Setting it explicitly is preferred: relying on the `/mnt/wisp` default is deprecated (wisp warns at startup) and will become required in a future major version. |
 | `WISP_SCHEDULE_INTERVAL` | `2h` | Fallback ceiling for the monitor loop. The scheduler otherwise wakes near a monitored item's next known airstamp/release — it doesn't poll on a fixed tick. |
 | `WISP_RESOLVE_CONCURRENCY` | `4` | How many episodes of a series resolve in parallel per scheduler pass. Titles are still processed one at a time, so this is the peak resolver fan-out against your debrid provider — raise it to drain long seasons faster, lower it if you hit rate limits. Clamped to `1`–`16`. |
 | `WISP_TIER_BACKOFF_MAX` | `168h` (7d) | Cap on the retry backoff for a requested quality tier that consistently returns "results exist, but not at this resolution" — e.g. a `2160p` request for a show with no 4K rips. Such a tier is retried on an exponential schedule from `WISP_SCHEDULE_INTERVAL` (interval, 2×, 4×, …), never more often than once per this duration once it saturates. wisp never permanently gives up, so a late release is still picked up; a successful pin of the tier resets it to the fast cadence. |
@@ -62,7 +63,11 @@ fine, but the list is gone).
 On every pin, rename, or delete, wisp tells your media server to rescan the
 affected folder, so new content appears immediately. Configure any combination of
 targets — all configured ones are notified. Paths are derived from
-`WISP_MOUNT_PATH` (falling back to `/mnt/wisp`), the path the server sees on disk.
+`WISP_NOTIFY_MOUNT_PATH`, the path the media server sees on disk. If it is unset,
+wisp reuses an explicitly configured `WISP_MOUNT_PATH`, and failing that falls
+back to `/mnt/wisp` with a startup deprecation warning. Set
+`WISP_NOTIFY_MOUNT_PATH` explicitly — the fallback will be removed in a future
+major version.
 
 - **Silo (recommended)** — in **Autoscan → Sources**, add a *Sonarr/Radarr
   Webhook* source, click **Generate webhook URL**, and set it as
