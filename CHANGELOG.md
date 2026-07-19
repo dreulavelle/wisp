@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.6.0](https://github.com/dreulavelle/wisp/compare/v1.5.0...v1.6.0) (2026-07-19)
+
+
+### Features
+
+* quality policy (1080p floor, 4K opt-in) + unblock request completion ([#41](https://github.com/dreulavelle/wisp/issues/41)) ([3284bcf](https://github.com/dreulavelle/wisp/commit/3284bcf2acf2c1b3124b20cacce9520a45e2e48c))
+
 ## [1.5.0](https://github.com/dreulavelle/wisp/compare/v1.4.0...v1.5.0) (2026-07-19)
 
 
