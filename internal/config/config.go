@@ -64,6 +64,12 @@ type Config struct {
 	// titles are processed one at a time, so this is the peak resolver fan-out.
 	// Clamped to [1, 16].
 	ResolveConcurrency int
+	// TierBackoffMax caps the per-quality-tier retry backoff. A requested tier that
+	// consistently returns "results exist but not at this resolution" (e.g. 2160p
+	// for a show with no 4K rips) is retried on an exponential schedule from
+	// ScheduleInterval, never more than once per this duration — so wisp backs off
+	// hard yet still catches a late release. Falls back on empty/unparseable input.
+	TierBackoffMax time.Duration
 	// TMDBAPIKey enables home-media release gating via TMDB (v3 key or v4 token).
 	TMDBAPIKey string
 	// TMDBMarkets is the ordered list of ISO-3166-1 regions whose digital/
@@ -96,6 +102,7 @@ func Load() (*Config, error) {
 		ReadChunkSizeLimit:   sizeEnv("WISP_READ_CHUNK_SIZE_LIMIT", 512<<20),
 		ScheduleInterval:     durationEnv("WISP_SCHEDULE_INTERVAL", 2*time.Hour),
 		ResolveConcurrency:   clampInt(intEnv("WISP_RESOLVE_CONCURRENCY", 4), 1, 16),
+		TierBackoffMax:       durationEnv("WISP_TIER_BACKOFF_MAX", 7*24*time.Hour),
 		TMDBAPIKey:           strings.TrimSpace(os.Getenv("WISP_TMDB_API_KEY")),
 		TMDBMarkets:          listEnv("WISP_TMDB_MARKETS", []string{"US", "CA", "GB", "AU", "DE", "FR", "IT", "ES", "JP", "IN"}),
 	}
