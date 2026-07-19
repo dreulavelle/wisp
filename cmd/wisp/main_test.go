@@ -78,7 +78,7 @@ func TestProbeSizeUsesRangeTotal(t *testing.T) {
 	}))
 	defer server.Close()
 
-	size, err := probeSize(context.Background(), server.URL)
+	size, err := testProber().probe(context.Background(), server.URL)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,7 +94,7 @@ func TestProbeSizeAcceptsRangeIgnoredWithLength(t *testing.T) {
 	}))
 	defer server.Close()
 
-	size, err := probeSize(context.Background(), server.URL)
+	size, err := testProber().probe(context.Background(), server.URL)
 	if err != nil || size != 123456 {
 		t.Fatalf("size = %d, err = %v", size, err)
 	}
@@ -108,7 +108,7 @@ func TestProbeSizeRejectsResolverErrorPage(t *testing.T) {
 	}))
 	defer server.Close()
 
-	if _, err := probeSize(context.Background(), server.URL); err == nil {
+	if _, err := testProber().probe(context.Background(), server.URL); err == nil {
 		t.Fatal("expected probe error")
 	}
 }
@@ -129,7 +129,7 @@ func TestSelectPlayableStreamFallsThrough(t *testing.T) {
 		{URL: bad.URL, Filename: "bad.mkv"},
 		{URL: good.URL, Filename: "good.mp4", Resolution: "1080p"},
 	}
-	stream, size, err := selectPlayableStream(context.Background(), streams)
+	stream, size, err := testProber().selectPlayableStream(context.Background(), streams)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -165,7 +165,7 @@ func wispTestBackend(t *testing.T) *httptest.Server {
 func TestResolveEnforcesRequestedQuality(t *testing.T) {
 	backend := wispTestBackend(t)
 	defer backend.Close()
-	a := &app{aio: aiostreams.New(backend.URL+"/stremio/uuid/blob/manifest.json", "pw")}
+	a := &app{aio: aiostreams.New(backend.URL+"/stremio/uuid/blob/manifest.json", "pw"), prober: testProber()}
 
 	// Best-stream when no quality requested → top-ranked 2160p.
 	_, _, _, res, err := a.resolve(context.Background(), "movie", "tt1", 0, 0, "", false)
@@ -309,6 +309,7 @@ func TestHandleAddQualityPinsCoexist(t *testing.T) {
 		store: st, log: slog.New(slog.DiscardHandler),
 		aio:     aiostreams.New(backend.URL+"/stremio/uuid/blob/manifest.json", "pw"),
 		webhook: notify.New(notify.Options{}, slog.New(slog.DiscardHandler)),
+		prober:  testProber(),
 	}
 
 	add := func(quality string) int {
@@ -377,6 +378,7 @@ func TestPinMultipleQualitiesSingleSearch(t *testing.T) {
 		store: st, log: slog.New(slog.DiscardHandler),
 		aio:     aiostreams.New(backend.URL+"/stremio/uuid/blob/manifest.json", "pw"),
 		webhook: notify.New(notify.Options{}, slog.New(slog.DiscardHandler)),
+		prober:  testProber(),
 	}
 
 	pin := func(season, episode int, quality string) {
