@@ -13,26 +13,18 @@ The payload is deliberately generic:
 
 ## Options
 
-### 1. The AIOStreams Silo plugin
-
-[silo-plugin-aiostreams](https://github.com/drondeseries/silo-plugin-aiostreams)
-has an optional **Wisp backend**: set its `wisp_url` config and, instead of
-writing `.strm` files, it POSTs each fulfilled movie/episode to wisp. It reuses
-its own episode enumeration (Cinemeta numbering, TVmaze air dates) and, on its
-scheduled refresh, queries `GET /api/pins` to add only genuinely new episodes.
-
-This makes the plugin — and your whole Silo request flow — work on **unmodified
-Silo**, with wisp providing durable, self-healing playback.
-
-### 2. Silo's native request router
+### 1. Silo's native request router (recommended)
 
 In the Silo-native stack this is the primary path: Silo's request system routes
-each approved request to wisp through the **silo-plugin-wisp** `request_router`
-shim (a companion project), which POSTs the request-shaped `/api/add` — ids,
-quality tiers, and (for series) seasons. There's no template to hand-write; the
-shim owns the mapping, and Silo polls `GET /api/requests/status` for state.
+each approved request to wisp through the
+[silo-plugin-wisp](https://github.com/dreulavelle/silo-plugin-wisp)
+`request_router` shim, which POSTs the request-shaped `/api/add` with the title's
+ids and quality tiers. Series requests are whole-series (Silo's request contract
+carries no season scoping) — wisp enumerates the episodes itself. There's no
+template to hand-write; the shim owns the mapping, and Silo polls
+`GET /api/requests/status` for state.
 
-### 3. Any request tool or webhook
+### 2. Any request tool or webhook
 
 Anything that can fire a webhook can feed wisp. Map the request's IDs to an
 `/api/add` call:
@@ -47,7 +39,7 @@ A small script on a cron works the same way — turn monitored/wanted items into
 `/api/add` calls. wisp de-dupes by virtual path, so re-adding is cheap; use
 `GET /api/pins` to skip what's already there.
 
-### 4. Directly / by hand
+### 3. Directly / by hand
 
 For a quick library or testing, just curl `/api/add`. See the
 [API Reference](API-Reference.md).
