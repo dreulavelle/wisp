@@ -215,6 +215,45 @@ func TestSearchCachesWithinTTL(t *testing.T) {
 	}
 }
 
+// SearchFresh (the self-heal path) must always hit AIOStreams even when a cached
+// entry exists — otherwise a dead pinned link would be "re-resolved" to the same
+// stale cached URLs — and it must refresh the cache with the new result.
+func TestSearchFreshBypassesAndRefreshesCache(t *testing.T) {
+	var hits int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt64(&hits, 1)
+		w.Write([]byte(`{"success":true,"data":{"results":[
+			{"url":"https://cdn.example/dl/hd/Show.S01E01.1080p.mkv","parsedFile":{"resolution":"1080p"}}
+		]}}`))
+	}))
+	defer server.Close()
+
+	c := New(server.URL+"/stremio/uuid-1/blob/manifest.json", "pw")
+
+	if _, err := c.Search(context.Background(), "series", "tt1", 1, 1); err != nil {
+		t.Fatal(err)
+	}
+	if got := atomic.LoadInt64(&hits); got != 1 {
+		t.Fatalf("hits = %d, want 1 (initial search)", got)
+	}
+
+	// SearchFresh must ignore the warm cache entry and re-hit upstream.
+	if _, err := c.SearchFresh(context.Background(), "series", "tt1", 1, 1); err != nil {
+		t.Fatal(err)
+	}
+	if got := atomic.LoadInt64(&hits); got != 2 {
+		t.Fatalf("hits = %d, want 2 (SearchFresh must bypass the cache)", got)
+	}
+
+	// ...and it refreshed the cache, so an ordinary Search is served without a hit.
+	if _, err := c.Search(context.Background(), "series", "tt1", 1, 1); err != nil {
+		t.Fatal(err)
+	}
+	if got := atomic.LoadInt64(&hits); got != 2 {
+		t.Fatalf("hits = %d, want 2 (SearchFresh should have refreshed the cache)", got)
+	}
+}
+
 // A classified failure (auth/rate-limit/transient) must never be cached as a
 // success — the next call has to re-hit upstream so a recovered instance is seen.
 func TestSearchDoesNotCacheFailures(t *testing.T) {

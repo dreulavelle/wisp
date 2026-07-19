@@ -332,7 +332,7 @@ func (a *app) pin(ctx context.Context, s pinSpec) (vpath string, size int64, err
 		searchID = "tmdb:" + s.TMDbID
 	}
 	wantQuality := library.NormalizeQuality(s.Quality)
-	sourceURL, size, filename, resolution, err := a.resolve(ctx, s.MediaType, searchID, s.Season, s.Episode, wantQuality)
+	sourceURL, size, filename, resolution, err := a.resolve(ctx, s.MediaType, searchID, s.Season, s.Episode, wantQuality, false)
 	if err != nil {
 		return "", 0, err
 	}
@@ -574,9 +574,9 @@ var (
 // file named [2160p]; if that tier has vanished it falls back to the best
 // available so playback still survives.
 func (a *app) reResolve(ctx context.Context, p *store.Pin) error {
-	sourceURL, size, _, _, err := a.resolve(ctx, p.MediaType, p.IMDbID, p.Season, p.Episode, library.NormalizeQuality(p.Quality))
+	sourceURL, size, _, _, err := a.resolve(ctx, p.MediaType, p.IMDbID, p.Season, p.Episode, library.NormalizeQuality(p.Quality), true)
 	if errors.Is(err, errNoQualityMatch) {
-		sourceURL, size, _, _, err = a.resolve(ctx, p.MediaType, p.IMDbID, p.Season, p.Episode, "")
+		sourceURL, size, _, _, err = a.resolve(ctx, p.MediaType, p.IMDbID, p.Season, p.Episode, "", true)
 	}
 	if err != nil {
 		return err
@@ -590,8 +590,14 @@ func (a *app) reResolve(ctx context.Context, p *store.Pin) error {
 // When wantQuality is set (canonical form from library.NormalizeQuality), only
 // streams of that resolution are considered, so a caller can pin distinct
 // 1080p/2160p files; an empty wantQuality keeps the best-stream behavior.
-func (a *app) resolve(ctx context.Context, mediaType, imdbID string, season, episode int, wantQuality string) (sourceURL string, size int64, filename, resolution string, err error) {
-	streams, err := a.aio.Search(ctx, mediaType, imdbID, season, episode)
+func (a *app) resolve(ctx context.Context, mediaType, imdbID string, season, episode int, wantQuality string, fresh bool) (sourceURL string, size int64, filename, resolution string, err error) {
+	search := a.aio.Search
+	if fresh {
+		// Self-heal: bypass the search cache so a dead pinned link is replaced
+		// with genuinely fresh resolver URLs, not the cached (stale) result set.
+		search = a.aio.SearchFresh
+	}
+	streams, err := search(ctx, mediaType, imdbID, season, episode)
 	if err != nil {
 		return "", 0, "", "", err
 	}

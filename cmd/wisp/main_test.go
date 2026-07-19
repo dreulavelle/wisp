@@ -167,12 +167,12 @@ func TestResolveEnforcesRequestedQuality(t *testing.T) {
 	a := &app{aio: aiostreams.New(backend.URL+"/stremio/uuid/blob/manifest.json", "pw")}
 
 	// Best-stream when no quality requested → top-ranked 2160p.
-	_, _, _, res, err := a.resolve(context.Background(), "movie", "tt1", 0, 0, "")
+	_, _, _, res, err := a.resolve(context.Background(), "movie", "tt1", 0, 0, "", false)
 	if err != nil || res != "2160p" {
 		t.Fatalf("unconstrained resolve = %q (err %v), want 2160p (top rank)", res, err)
 	}
 	// Requesting 1080p must skip the higher-ranked 2160p result.
-	url, _, _, res, err := a.resolve(context.Background(), "movie", "tt1", 0, 0, "1080p")
+	url, _, _, res, err := a.resolve(context.Background(), "movie", "tt1", 0, 0, "1080p", false)
 	if err != nil || res != "1080p" {
 		t.Fatalf("1080p resolve = %q (err %v), want 1080p", res, err)
 	}
@@ -180,7 +180,7 @@ func TestResolveEnforcesRequestedQuality(t *testing.T) {
 		t.Fatalf("selected url = %q, want the 1080p stream", url)
 	}
 	// A quality with no matching stream is a distinct, retriable condition.
-	if _, _, _, _, err := a.resolve(context.Background(), "movie", "tt1", 0, 0, "720p"); !errors.Is(err, errNoQualityMatch) {
+	if _, _, _, _, err := a.resolve(context.Background(), "movie", "tt1", 0, 0, "720p", false); !errors.Is(err, errNoQualityMatch) {
 		t.Fatalf("720p resolve err = %v, want errNoQualityMatch", err)
 	}
 }

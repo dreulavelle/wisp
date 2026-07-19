@@ -174,6 +174,18 @@ type searchResponse struct {
 // Search returns playable streams (those with a URL) for a movie or episode,
 // ordered by AIOStreams' own ranking. mediaType is "movie" or "series".
 func (c *Client) Search(ctx context.Context, mediaType, imdbID string, season, episode int) ([]Stream, error) {
+	return c.search(ctx, mediaType, imdbID, season, episode, true)
+}
+
+// SearchFresh always queries AIOStreams (bypassing the cache read) and refreshes
+// the cached entry with the result. The self-heal path uses this: when a pinned
+// resolver URL has died, re-resolution must get *new* URLs — a cached, possibly
+// stale result set would just hand back the dead links and defeat the heal.
+func (c *Client) SearchFresh(ctx context.Context, mediaType, imdbID string, season, episode int) ([]Stream, error) {
+	return c.search(ctx, mediaType, imdbID, season, episode, false)
+}
+
+func (c *Client) search(ctx context.Context, mediaType, imdbID string, season, episode int, useCache bool) ([]Stream, error) {
 	origin, err := c.origin()
 	if err != nil {
 		return nil, err
@@ -186,8 +198,10 @@ func (c *Client) Search(ctx context.Context, mediaType, imdbID string, season, e
 	// identifies the (type, title, season, episode) tuple, so a fresh unit still
 	// searches while consecutive tiers of the same unit reuse the result set.
 	cacheKey := mediaType + "|" + id
-	if streams, ok := c.cacheGet(cacheKey); ok {
-		return streams, nil
+	if useCache {
+		if streams, ok := c.cacheGet(cacheKey); ok {
+			return streams, nil
+		}
 	}
 	q := url.Values{}
 	q.Set("type", mediaType)
