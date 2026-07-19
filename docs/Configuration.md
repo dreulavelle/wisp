@@ -27,6 +27,8 @@ All configuration is via environment variables.
 | `WISP_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error`. `debug` narrates every serve + the full self-heal path. |
 | `WISP_READ_CHUNK_SIZE` | `32M` | Initial VFS read chunk (smaller = less debrid over-fetch on seeks). |
 | `WISP_READ_CHUNK_SIZE_LIMIT` | `512M` | Cap for the read-chunk ramp. |
+| `WISP_LAZY_RESOLUTION` | `false` | Enable/disable lazy placeholder resolution (creates 1-byte placeholder immediately, resolves on-demand or in background). |
+
 
 ## AIOStreams URL & auth
 
@@ -93,3 +95,10 @@ throughput.
 
 See [Deployment](Deployment.md) for the `/dev/fuse`, `SYS_ADMIN`, and mount
 propagation requirements.
+
+## Lazy Resolution
+
+When `WISP_LAZY_RESOLUTION` is enabled (`true`), Wisp immediately writes a 1-byte placeholder pin upon monitoring a title. This allows your media server (Plex, Jellyfin, Silo, etc.) to immediately scan and catalog the item.
+
+When a client attempts playback of a placeholder, Wisp intercepts the read request, resolves the stream from AIOStreams, and updates the pin with the real stream URL and size. The scheduler also periodically pre-resolves placeholders in the background once they are eligible (past release date), updating their pins and size.
+

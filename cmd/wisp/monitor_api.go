@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/dreulavelle/wisp/internal/library"
+	"github.com/dreulavelle/wisp/internal/metadata"
 	"github.com/dreulavelle/wisp/internal/monitor"
 	"github.com/dreulavelle/wisp/internal/store"
 )
@@ -19,15 +20,16 @@ import (
 // error is a real fault (auth/rate-limit/store) worth surfacing.
 func (a *app) Pin(ctx context.Context, t monitor.Target) (monitor.PinOutcome, error) {
 	if a.lazyResolution {
-		wantQuality := library.NormalizeQuality(t.Quality)
-		if wantQuality == "" {
-			wantQuality = "1080p"
-		}
+		wantQuality := qualityLabel("", "", library.NormalizeQuality(t.Quality))
 		searchID := t.IMDbID
 		if searchID == "" && t.TMDbID != "" {
 			searchID = "tmdb:" + t.TMDbID
 		}
 		ids := library.IDs{IMDb: searchID, TMDb: t.TMDbID, TVDb: t.TVDbID}
+		if ids.TVDb == "" && ids.TMDb == "" && strings.HasPrefix(searchID, "tt") {
+			tvdb, tmdb := metadata.ProviderIDs(ctx, t.MediaType, searchID)
+			ids.TVDb, ids.TMDb = tvdb, tmdb
+		}
 		root := t.Category
 		if root == "" {
 			root = a.inheritCategory(ctx, searchID, t.MediaType)
@@ -39,6 +41,24 @@ func (a *app) Pin(ctx context.Context, t monitor.Target) (monitor.PinOutcome, er
 			vpath = library.MoviePath(root, t.Title, t.Year, ids, wantQuality, ext)
 		} else {
 			vpath = library.EpisodePath(root, t.Title, t.Year, t.Season, t.Episode, ids, wantQuality, ext)
+		}
+
+		// If the placeholder already exists, let the background scheduler try to resolve it eagerly.
+		existing, err := a.store.ByPath(ctx, vpath)
+		if err == nil && existing != nil {
+			_, _, err := a.pin(ctx, pinSpec{
+				MediaType: t.MediaType, IMDbID: searchID, TMDbID: t.TMDbID, TVDbID: t.TVDbID,
+				Title: t.Title, Year: t.Year, Season: t.Season, Episode: t.Episode, Quality: t.Quality,
+				Category: t.Category,
+			})
+			if err == nil {
+				return monitor.Pinned, nil
+			}
+			outcome, reason := pinOutcome(err)
+			if reason == "" {
+				return outcome, err
+			}
+			return outcome, nil
 		}
 
 		pin := store.Pin{
@@ -55,8 +75,8 @@ func (a *app) Pin(ctx context.Context, t monitor.Target) (monitor.PinOutcome, er
 		}
 
 		a.webhook.Import(ctx, t.MediaType, vpath)
-		a.broadcastPinCompleted(t.MediaType, t.IMDbID, ids.TMDb, ids.TVDb, vpath)
-		a.log.Info("created placeholder pin", "path", vpath, "imdb", t.IMDbID)
+		a.broadcastPinCompleted(t.MediaType, searchID, ids.TMDb, ids.TVDb, vpath)
+		a.log.Info("created placeholder pin", "path", vpath, "imdb", searchID)
 		return monitor.Pinned, nil
 	}
 
@@ -106,6 +126,9 @@ func (a *app) PinnedKeys(ctx context.Context, imdbID string) (map[monitor.PinKey
 	}
 	keys := make(map[monitor.PinKey]bool, len(pins))
 	for _, p := range pins {
+		if p.SourceURL == "" {
+			continue // skip placeholder pins so the scheduler tries to resolve them in the background
+		}
 		keys[monitor.PinKey{Season: p.Season, Episode: p.Episode, Quality: library.NormalizeQuality(p.Quality)}] = true
 	}
 	return keys, nil

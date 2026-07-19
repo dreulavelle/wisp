@@ -68,3 +68,51 @@ func TestMonitorCRUD(t *testing.T) {
 		t.Fatalf("monitors after delete = %d", n)
 	}
 }
+
+func TestLazyResolution(t *testing.T) {
+	a := testApp(t)
+	a.lazyResolution = true
+
+	target := monitor.Target{
+		MediaType: "movie",
+		IMDbID:    "tt1375666",
+		Title:     "Inception",
+		Year:      2010,
+		Quality:   "1080p",
+		Category:  "movies",
+	}
+
+	// 1. First Pin should create a placeholder immediately
+	outcome, err := a.Pin(context.Background(), target)
+	if err != nil {
+		t.Fatalf("first Pin failed: %v", err)
+	}
+	if outcome != monitor.Pinned {
+		t.Fatalf("expected outcome monitor.Pinned, got %v", outcome)
+	}
+
+	// Verify placeholder is written in store
+	pins, err := a.store.PinsByMedia(context.Background(), "tt1375666")
+	if err != nil {
+		t.Fatalf("PinsByMedia failed: %v", err)
+	}
+	if len(pins) != 1 {
+		t.Fatalf("expected 1 pin, got %d", len(pins))
+	}
+	p := pins[0]
+	if p.SourceURL != "" {
+		t.Fatalf("expected empty SourceURL for placeholder, got %q", p.SourceURL)
+	}
+	if p.Size != 1 {
+		t.Fatalf("expected placeholder Size to be 1, got %d", p.Size)
+	}
+
+	// 2. PinnedKeys should NOT return placeholder pins as pinned
+	keys, err := a.PinnedKeys(context.Background(), "tt1375666")
+	if err != nil {
+		t.Fatalf("PinnedKeys failed: %v", err)
+	}
+	if len(keys) != 0 {
+		t.Fatalf("expected 0 pinned keys for placeholder pins, got %d", len(keys))
+	}
+}
