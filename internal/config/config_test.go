@@ -198,3 +198,38 @@ func TestListEnv(t *testing.T) {
 		t.Fatalf("fallback = %v", got)
 	}
 }
+
+func TestLoadNotifyDebounce(t *testing.T) {
+	t.Setenv("WISP_AIOSTREAMS_URL", "https://host/stremio/uuid/blob/manifest.json")
+
+	// Unset: coalescing is on by default.
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.NotifyDebounce != 5*time.Second {
+		t.Fatalf("default debounce = %v, want 5s", c.NotifyDebounce)
+	}
+
+	for _, tc := range []struct {
+		in   string
+		want time.Duration
+	}{
+		{"10s", 10 * time.Second},
+		{"0", 0},                     // explicit zero disables — the escape hatch
+		{"0s", 0},                    // ...in either spelling
+		{"1ms", time.Second},         // clamped up
+		{"10m", time.Minute},         // clamped down
+		{"garbage", 5 * time.Second}, // unparseable falls back
+		{"-5s", 5 * time.Second},     // negative falls back
+	} {
+		t.Setenv("WISP_NOTIFY_DEBOUNCE", tc.in)
+		c, err := Load()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c.NotifyDebounce != tc.want {
+			t.Errorf("debounce(%q) = %v, want %v", tc.in, c.NotifyDebounce, tc.want)
+		}
+	}
+}

@@ -45,6 +45,12 @@ type Config struct {
 	// targets. Empty falls back to MountPath, and then to the notifier's
 	// historical /mnt/wisp default.
 	NotifyMountPath string
+	// NotifyDebounce is the quiet period used to coalesce a burst of pins into
+	// one media-server notification per parent directory. Zero disables
+	// coalescing entirely, restoring one immediate notification per file — the
+	// escape hatch for a consumer that cannot handle batched events. Clamped
+	// to [1s, 60s] when non-zero.
+	NotifyDebounce time.Duration
 	// NotifyMountPathDefaulted reports that notification targets are configured
 	// but neither WISP_NOTIFY_MOUNT_PATH nor WISP_MOUNT_PATH was set, so the
 	// notifier's built-in default is in play. Load has no logger, so the caller
@@ -121,6 +127,7 @@ func Load() (*Config, error) {
 		NotifyEmbyAPIKey:     strings.TrimSpace(os.Getenv("WISP_NOTIFY_EMBY_API_KEY")),
 		NotifyPlexURL:        strings.TrimSpace(os.Getenv("WISP_NOTIFY_PLEX_URL")),
 		NotifyPlexToken:      strings.TrimSpace(os.Getenv("WISP_NOTIFY_PLEX_TOKEN")),
+		NotifyDebounce:       clampNotifyDebounce(optionalDurationEnv("WISP_NOTIFY_DEBOUNCE", 5*time.Second)),
 		NotifyMountPath:      strings.TrimSpace(os.Getenv("WISP_NOTIFY_MOUNT_PATH")),
 		MountPath:            strings.TrimSpace(os.Getenv("WISP_MOUNT_PATH")),
 		MountAllowOther:      boolEnv("WISP_MOUNT_ALLOW_OTHER", true),
@@ -169,6 +176,31 @@ func durationEnv(key string, fallback time.Duration) time.Duration {
 		return fallback
 	}
 	return d
+}
+
+// optionalDurationEnv parses a Go duration like durationEnv, except that an
+// explicit zero ("0", "0s") is honored rather than treated as absent — zero is
+// how an optional knob is switched off. Empty, negative, or unparseable input
+// still falls back.
+func optionalDurationEnv(key string, fallback time.Duration) time.Duration {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return fallback
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d < 0 {
+		return fallback
+	}
+	return d
+}
+
+// clampNotifyDebounce bounds a non-zero debounce window to a sane range; zero
+// passes through untouched to mean "disabled".
+func clampNotifyDebounce(d time.Duration) time.Duration {
+	if d == 0 {
+		return 0
+	}
+	return clampDuration(d, time.Second, time.Minute)
 }
 
 // intEnv parses a base-10 integer, falling back on empty or unparseable input.

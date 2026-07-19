@@ -190,7 +190,49 @@ Prometheus text-format metrics: `wisp_pins`, `wisp_mounted`, `wisp_uptime_second
 
 ## `GET /api/healthz`
 
-`200 ok` — liveness probe.
+`200 ok` — liveness probe. Always `200` if the process is serving HTTP at all;
+it says nothing about the mount. Use `/api/health` to gate a dependent container.
+
+## `GET /api/health`
+
+Readiness probe. **The status code is the contract:**
+
+- `200` — ready.
+- `503` — not ready.
+
+The body is for humans; don't parse it.
+
+```json
+{ "status": "ok", "self_mount": true, "mounted": true }
+```
+
+`status` is `ok` or `mount_down`. `mounted` is present only when wisp is
+self-mounting. No auth, and no paths, URLs, or tokens are exposed.
+
+What "ready" means depends on how wisp is deployed:
+
+| Deployment | Ready when |
+|---|---|
+| **Self-mounting** (`WISP_MOUNT_PATH` set) | The HTTP server is up **and** the FUSE mount is live. An alive-but-unmounted wisp would let a media server scan an empty mountpoint, so that reports `503`. |
+| **HTTP-only** (no `WISP_MOUNT_PATH`) | The HTTP server is up. The operator mounts externally, so wisp has no mount to report on and mount state is not part of the verdict. |
+
+The check is deliberately cheap and dependency-free: it makes no AIOStreams or
+TMDb call (an upstream outage must not mark wisp unhealthy — already-pinned
+files still serve) and no database read.
+
+Recommended Docker healthcheck — gate a media server on wisp being mounted with
+`depends_on: { wisp: { condition: service_healthy } }`:
+
+```yaml
+healthcheck:
+  test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:8080/api/health"]
+  interval: 10s
+  timeout: 3s
+  retries: 3
+  start_period: 30s
+```
+
+`wget --spider` exits non-zero on a `503`, so no output parsing is involved.
 
 ---
 
