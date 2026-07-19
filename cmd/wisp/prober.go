@@ -227,7 +227,11 @@ func (p *prober) probe(ctx context.Context, rawURL string) (int64, error) {
 
 	queueStart := time.Now()
 	if err := p.sem.Acquire(ctx, 1); err != nil {
-		// Cancelled/queued-out before doing any network work.
+		// Cancelled/queued-out (winner decided or 429 stopped the wave) before doing
+		// any network work. Still account for the time spent queued and record the
+		// cancellation so a contended-semaphore stop is observable.
+		p.metrics.addQueueWait(time.Since(queueStart))
+		p.metrics.recordFailure(reasonCanceled)
 		return 0, &probeError{reason: reasonCanceled, err: err}
 	}
 	defer p.sem.Release(1)

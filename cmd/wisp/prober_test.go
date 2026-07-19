@@ -284,6 +284,60 @@ func TestBodyHandlingBoundedDrainOnLargeOK(t *testing.T) {
 	}
 }
 
+// A probe whose ctx is canceled WHILE it is still queued for a saturated
+// semaphore must still be observable: its queue-wait is recorded and it counts
+// as a canceled failure (the acquire never happens, so no request is issued).
+func TestProbeCanceledWhileQueuedIsAccounted(t *testing.T) {
+	srv := httptest.NewServer(mediaProbe("1"))
+	defer srv.Close()
+
+	p := newProber(probeConfig{Concurrency: 1, Window: 1, Timeout: 5 * time.Second}, slog.New(slog.DiscardHandler))
+
+	// Saturate the single permit and hold it so the second probe must queue.
+	if err := p.sem.Acquire(context.Background(), 1); err != nil {
+		t.Fatalf("prime acquire: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := p.probe(ctx, srv.URL)
+		done <- err
+	}()
+
+	// Let the probe reach the (blocked) semaphore acquire, then cancel it.
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+
+	select {
+	case err := <-done:
+		var pe *probeError
+		if !errors.As(err, &pe) || pe.reason != reasonCanceled {
+			t.Fatalf("err = %v, want a canceled probeError", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("probe did not return after cancellation")
+	}
+	p.sem.Release(1)
+
+	ps := p.metrics.snapshot()
+	if ps.FailCanceled != 1 {
+		t.Fatalf("FailCanceled = %d, want 1", ps.FailCanceled)
+	}
+	if ps.Requests != 0 {
+		t.Fatalf("Requests = %d, want 0 (permit never acquired)", ps.Requests)
+	}
+	if ps.QueueWaitCount != 1 {
+		t.Fatalf("QueueWaitCount = %d, want 1 (queued time recorded)", ps.QueueWaitCount)
+	}
+	if ps.QueueWaitNanos <= 0 {
+		t.Fatalf("QueueWaitNanos = %d, want > 0", ps.QueueWaitNanos)
+	}
+	if ps.Candidates != 1 {
+		t.Fatalf("Candidates = %d, want 1", ps.Candidates)
+	}
+}
+
 // TestProbeDrains206Body confirms the one-byte partial body is consumed (so the
 // socket is reusable) and the size comes from Content-Range.
 func TestProbeDrains206Body(t *testing.T) {
