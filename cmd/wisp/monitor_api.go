@@ -38,8 +38,8 @@ func (a *app) Pin(ctx context.Context, t monitor.Target) (monitor.PinOutcome, er
 			MediaType: t.MediaType, IMDbID: t.IMDbID, TMDbID: ids.TMDb, TVDbID: ids.TVDb,
 			Category: root, Season: t.Season, Episode: t.Episode,
 			Title: t.Title, Year: t.Year, Quality: wantQuality, VirtualPath: vpath,
-			SourceURL: "",
-			Size:      1,
+			SourceURL:  "",
+			Size:       1,
 			ResolvedAt: time.Now(),
 		}
 
