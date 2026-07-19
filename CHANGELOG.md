@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.3.2](https://github.com/dreulavelle/wisp/compare/v1.3.1...v1.3.2) (2026-07-19)
+
+
+### Bug Fixes
+
+* coalesce media-server notifications; add /api/health ([#32](https://github.com/dreulavelle/wisp/issues/32)) ([6dccb3d](https://github.com/dreulavelle/wisp/commit/6dccb3d29f53d3ea76af15a78665bb89f8f59500))
+
 ## [1.3.1](https://github.com/dreulavelle/wisp/compare/v1.3.0...v1.3.1) (2026-07-19)
 
 
