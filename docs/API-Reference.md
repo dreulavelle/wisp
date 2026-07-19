@@ -168,11 +168,32 @@ curl "http://localhost:8080/api/requests/status?media_type=movie&tmdb_id=27205"
 | `state` | string | `queued` (tracked, nothing in scope pinned yet — includes unreleased/unaired), `completed` (requested scope pinned and servable), or `failed` (permanent give-up on an unresolvable identity) |
 | `pinned_qualities` | string[] | Sorted, unique resolution tiers that have a servable pin |
 | `pinned_paths` | string[] | Virtual paths of those servable pins, in the same order wisp stores them — one entry per pinned file, so a caller can map a tier to the exact file the mount exposes. Omitted when nothing is pinned |
-| `detail` | string | Why the title is in this state (e.g. `awaiting home-media release`, `resolving stream`) |
+| `detail` | string | Why the title is in this state (e.g. `awaiting home-media release`, `resolving stream`), including any tier that was given up on |
 | `request_ref` | string | Echoes the `request_ref` from intake, when one was supplied |
 
 Only **servable** pins count — a pin whose stream has gone is neither
 `completed` nor listed in `pinned_paths`.
+
+### Tiers that never materialize
+
+A requested tier that simply does not exist (a 2160p request for a title with no
+4K rips) must not hold a request open for ever. Once the scheduler's per-tier
+backoff for that tier has saturated at `WISP_TIER_BACKOFF_MAX` — meaning every
+aired episode reported "results exist, but none at this resolution", repeatedly,
+over days — the tier stops counting toward completion, and `detail` names it:
+
+```json
+{
+  "state": "completed",
+  "pinned_qualities": ["1080p"],
+  "detail": "requested scope pinned; gave up on 2160p (no releases found at that quality after repeated checks)"
+}
+```
+
+The monitor still retries the tier for ever in the background (wisp never
+permanently abandons one), so a late 4K release is still pinned — the title just
+stops reporting `queued` in the meantime. A title with **nothing** servable
+pinned is never `completed`, however hopeless its tiers are.
 
 ---
 

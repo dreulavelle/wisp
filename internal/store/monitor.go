@@ -70,6 +70,16 @@ type Monitored struct {
 	// for a series (0 = caught up). It lets the status API report series
 	// completion without a network call. Meaningless for movies.
 	PendingAired int
+	// PendingByTier breaks PendingAired down by the requested quality tier that is
+	// still unpinned, keyed by canonical quality (library.NormalizeQuality). It
+	// exists so the status API can discount work belonging to a tier the scheduler
+	// has given up on — PendingAired alone is a scalar that mixes tiers, so a
+	// nonexistent 2160p release would otherwise block completion forever.
+	//
+	// It is a subset, not a partition: the default ("best available") tier is never
+	// tracked here, so sum(PendingByTier) <= PendingAired. Nil/absent for old
+	// records and titles with no requested tiers — zero-value tolerant.
+	PendingByTier map[string]int `json:"PendingByTier,omitempty"`
 	// Failed marks a permanent give-up (unresolvable identity). wisp otherwise
 	// retries indefinitely, so this is rare by design; it is never set for an
 	// unreleased/unaired title.

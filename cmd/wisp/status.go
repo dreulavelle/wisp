@@ -63,7 +63,7 @@ func (a *app) handleRequestStatus(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r) // not tracked — the caller should (re)submit via /api/add
 		return
 	}
-	writeJSON(w, computeRequestStatus(mon, pins, mediaType, time.Now()))
+	writeJSON(w, computeRequestStatus(mon, pins, mediaType, time.Now(), a.mon.TierExhausted))
 }
 
 // findMonitor locates the monitored record for a title by tmdb id (preferred)
@@ -112,19 +112,31 @@ func (a *app) servablePins(ctx context.Context, searchIDs []string, tmdbID strin
 	return out
 }
 
+// tierExhaustedFunc reports whether a quality tier's retry budget is spent — see
+// monitor.Monitor.TierExhausted, which is the production implementation. A nil
+// func means "nothing has been given up on", so a caller with no monitor wired in
+// gets the pre-existing (strict) behavior.
+type tierExhaustedFunc func(store.TierBackoffState) bool
+
 // computeRequestStatus maps a monitor + its servable pins onto the request
 // state. mediaType is the query hint, used when no monitor/pin fixes it.
 //
 // Mapping rules (from the architecture memo):
 //   - failed: permanent give-up only (Monitored.Failed) — never for an
 //     unreleased/unaired title.
-//   - completed: requested scope pinned and servable. Movie: a servable pin
-//     exists. Series: a servable pin exists AND the scheduler's last pass found
-//     no aired-but-unpinned episodes (PendingAired == 0). Series monitors keep
-//     running for future episodes but still report completed.
+//   - completed: requested scope pinned and servable, DISCOUNTING tiers the
+//     scheduler has exhausted its retry budget on (see abandonedTiers). Movie:
+//     every requested-and-still-attainable tier has a servable pin. Series: a
+//     servable pin exists AND no aired-but-unpinned episodes remain for an
+//     attainable tier. Series monitors keep running for future episodes but still
+//     report completed.
 //   - queued: otherwise — tracked but nothing in scope pinned yet, whether
 //     unreleased/unaired or in the released-but-no-stream-yet retry window.
-func computeRequestStatus(mon *store.Monitored, pins []store.Pin, mediaType string, now time.Time) requestStatus {
+//
+// Nothing pinned is never completed, whatever the backoff state says: a title
+// with every tier abandoned and no servable file is still queued, because the
+// scheduler never stops retrying it.
+func computeRequestStatus(mon *store.Monitored, pins []store.Pin, mediaType string, now time.Time, exhausted tierExhaustedFunc) requestStatus {
 	// Only servable pins count toward completion or pinned_qualities — a pin whose
 	// stream is gone is not "done". (The HTTP path pre-filters; this keeps the
 	// function correct for any caller.)
@@ -148,14 +160,15 @@ func computeRequestStatus(mon *store.Monitored, pins []store.Pin, mediaType stri
 	if mon != nil {
 		st.RequestRef = mon.RequestRef
 	}
+	abandoned := abandonedTiers(mon, pins, exhausted)
 
 	switch {
 	case mon != nil && mon.Failed:
 		st.State = statusFailed
 		st.Detail = failDetail(mon)
-	case isCompleted(mt, mon, pins):
+	case isCompleted(mt, mon, pins, abandoned):
 		st.State = statusCompleted
-		st.Detail = "requested scope pinned"
+		st.Detail = completedDetail(abandoned)
 	default:
 		st.State = statusQueued
 		st.Detail = queuedDetail(mon, now)
@@ -163,15 +176,46 @@ func computeRequestStatus(mon *store.Monitored, pins []store.Pin, mediaType stri
 	return st
 }
 
-// isCompleted reports whether the requested scope is pinned and servable.
-func isCompleted(mediaType string, mon *store.Monitored, pins []store.Pin) bool {
+// abandonedTiers returns the sorted requested tiers the scheduler has given up
+// on: in tier backoff with an exhausted retry budget, requested by this monitor,
+// and not already pinned. Those three conditions together mean "wisp looked for
+// this resolution across the whole title, repeatedly, and it does not exist" — so
+// it should stop blocking completion, even though the scheduler keeps retrying it
+// forever in the background.
+func abandonedTiers(mon *store.Monitored, pins []store.Pin, exhausted tierExhaustedFunc) []string {
+	if mon == nil || exhausted == nil || len(mon.TierBackoff) == 0 {
+		return nil
+	}
+	pinned := make(map[string]bool, len(pins))
+	for _, p := range pins {
+		pinned[library.NormalizeQuality(p.Quality)] = true
+	}
+	requested := make(map[string]bool, len(mon.Qualities))
+	for _, q := range mon.Qualities {
+		if n := library.NormalizeQuality(q); n != "" {
+			requested[n] = true
+		}
+	}
+	var out []string
+	for q, st := range mon.TierBackoff {
+		if requested[q] && !pinned[q] && exhausted(st) {
+			out = append(out, q)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// isCompleted reports whether the requested scope is pinned and servable,
+// treating the abandoned tiers as out of scope.
+func isCompleted(mediaType string, mon *store.Monitored, pins []store.Pin, abandoned []string) bool {
 	if len(pins) == 0 {
-		return false
+		return false // nothing servable is never done, however hopeless the rest is
 	}
 	if mediaType == "series" {
 		// Need the scheduler's aired-coverage signal; without a monitor we can't
 		// confirm every aired episode is present.
-		return mon != nil && !mon.LastChecked.IsZero() && mon.PendingAired == 0
+		return mon != nil && !mon.LastChecked.IsZero() && pendingAttainable(mon, abandoned) == 0
 	}
 	// Movie: every requested quality tier must have a servable pin — otherwise a
 	// 1080p pin would report "completed" while a later 2160p request is still
@@ -180,7 +224,57 @@ func isCompleted(mediaType string, mon *store.Monitored, pins []store.Pin) bool 
 	if mon == nil {
 		return true
 	}
-	return allTiersPinned(mon.Qualities, pins)
+	// The same reasoning as the series gate applies: a movie requesting 1080p+2160p
+	// where 2160p demonstrably has no releases would otherwise report queued for
+	// ever. Discount the abandoned tiers and require the rest.
+	return allTiersPinned(withoutTiers(mon.Qualities, abandoned), pins)
+}
+
+// pendingAttainable is PendingAired minus the aired-but-unpinned work that
+// belongs to an abandoned tier. PendingAired is a scalar over (episode × tier)
+// units, so the per-tier breakdown is what makes the subtraction possible.
+//
+// The result is clamped at zero: PendingByTier is absent on records written
+// before it existed (they simply don't discount anything until the next
+// scheduler pass rewrites them) and must never push the count negative.
+func pendingAttainable(mon *store.Monitored, abandoned []string) int {
+	pending := mon.PendingAired
+	for _, q := range abandoned {
+		pending -= mon.PendingByTier[q]
+	}
+	if pending < 0 {
+		return 0
+	}
+	return pending
+}
+
+// withoutTiers returns requested minus drop, preserving order.
+func withoutTiers(requested, drop []string) []string {
+	if len(drop) == 0 {
+		return requested
+	}
+	skip := make(map[string]bool, len(drop))
+	for _, q := range drop {
+		skip[q] = true
+	}
+	out := make([]string, 0, len(requested))
+	for _, q := range requested {
+		if !skip[library.NormalizeQuality(q)] {
+			out = append(out, q)
+		}
+	}
+	return out
+}
+
+// completedDetail explains a completion, naming any tier that was given up on so
+// an operator (and Silo, which passes Detail straight through) can see why the
+// request closed with a resolution missing.
+func completedDetail(abandoned []string) string {
+	if len(abandoned) == 0 {
+		return "requested scope pinned"
+	}
+	return "requested scope pinned; gave up on " + strings.Join(abandoned, ", ") +
+		" (no releases found at that quality after repeated checks)"
 }
 
 // allTiersPinned reports whether every requested quality tier has a servable
