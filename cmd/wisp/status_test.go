@@ -37,6 +37,7 @@ func offlineApp(t *testing.T) *app {
 		meta:    metadata.New("", nil, metadata.WithBaseURLs(stub.URL, stub.URL, stub.URL)),
 		webhook: notify.New(notify.Options{}, log),
 		prober:  testProber(),
+		quality: allowAllQualities,
 	}
 	a.mon = monitor.New(st, a.meta, a, time.Hour, 4, 7*24*time.Hour, log)
 	return a

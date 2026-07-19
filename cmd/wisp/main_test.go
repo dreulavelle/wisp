@@ -15,10 +15,17 @@ import (
 	"time"
 
 	"github.com/dreulavelle/wisp/internal/aiostreams"
+	"github.com/dreulavelle/wisp/internal/library"
 	"github.com/dreulavelle/wisp/internal/monitor"
 	"github.com/dreulavelle/wisp/internal/notify"
 	"github.com/dreulavelle/wisp/internal/store"
 )
+
+// allowAllQualities is the permissive policy used by tests that exercise tiers
+// rather than the policy itself. Production wires cfg.QualityPolicy() instead,
+// whose defaults are stricter (1080p floor, no 4K) — the zero value blocks 2160p
+// deliberately, so a handler that forgot to be wired fails closed.
+var allowAllQualities = library.QualityPolicy{Allow2160p: true}
 
 // A file removed through the mount must both unpin and fire the Silo delete
 // webhook — the same path the API delete takes.
@@ -310,6 +317,7 @@ func TestHandleAddQualityPinsCoexist(t *testing.T) {
 		aio:     aiostreams.New(backend.URL+"/stremio/uuid/blob/manifest.json", "pw"),
 		webhook: notify.New(notify.Options{}, slog.New(slog.DiscardHandler)),
 		prober:  testProber(),
+		quality: allowAllQualities,
 	}
 
 	add := func(quality string) int {
@@ -379,6 +387,7 @@ func TestPinMultipleQualitiesSingleSearch(t *testing.T) {
 		aio:     aiostreams.New(backend.URL+"/stremio/uuid/blob/manifest.json", "pw"),
 		webhook: notify.New(notify.Options{}, slog.New(slog.DiscardHandler)),
 		prober:  testProber(),
+		quality: allowAllQualities,
 	}
 
 	pin := func(season, episode int, quality string) {

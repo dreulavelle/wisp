@@ -3,8 +3,11 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"strings"
 	"time"
 
+	"github.com/dreulavelle/wisp/internal/library"
 	"go.etcd.io/bbolt"
 )
 
@@ -114,6 +117,111 @@ func monitoredSearchID(m Monitored) string {
 		return "tmdb:" + m.TMDbID
 	}
 	return ""
+}
+
+// ApplyQualityPolicy is an idempotent startup migration that rewrites every
+// monitor's requested tiers through the configured policy, so a tier the operator
+// disallowed stops being scraped on the very next scheduler pass. Filtering at
+// intake alone is not enough: Monitored.Qualities is what targetsForQualities
+// reads on every pass, and Intake unions a new request onto the stored list, so a
+// 2160p left in the store would be re-requested for ever.
+//
+// A monitor whose ONLY tier is disallowed is marked Failed with an explanatory
+// LastError rather than silently downgraded to "best available" — the request was
+// for a resolution wisp will not fetch, so the status API should report it failed
+// and let the caller close it, exactly as a fresh intake would be rejected. An
+// already-Completed or already-Failed monitor is left untouched.
+//
+// Removing a tier also drops its backoff and pending-work bookkeeping, so a
+// series is not left reporting pending episodes for a tier nobody is chasing.
+// Monitors that request nothing ("best available") are unconstrained and skipped.
+//
+// It is one-way: re-enabling a tier later does not restore it to existing
+// monitors, which must be re-requested. Returns the number of monitors rewritten
+// and the keys of those marked failed.
+func (s *Store) ApplyQualityPolicy(_ context.Context, p library.QualityPolicy) (int, []string, error) {
+	type kv struct{ k, v []byte }
+	var writes []kv
+	var failedKeys []string
+	err := s.db.Update(func(tx *bbolt.Tx) error {
+		b := tx.Bucket(monitorsBucket)
+		// Collect writes during iteration and apply them after — mutating a bbolt
+		// bucket inside its own ForEach can make the cursor skip or repeat keys.
+		if err := b.ForEach(func(k, v []byte) error {
+			var m Monitored
+			if err := json.Unmarshal(v, &m); err != nil {
+				return err
+			}
+			if len(m.Qualities) == 0 || m.Completed || m.Failed {
+				return nil
+			}
+			next, applyErr := p.Apply(m.Qualities)
+			switch {
+			case errors.Is(applyErr, library.ErrNoAllowedQuality):
+				m.Failed = true
+				m.LastError = "requested quality " + strings.Join(m.Qualities, ",") +
+					" is disabled by the configured quality policy; re-request at an allowed tier"
+				failedKeys = append(failedKeys, m.Key)
+			case applyErr != nil:
+				return applyErr
+			case sameStrings(m.Qualities, next):
+				return nil // already compliant — leave the record byte-identical
+			default:
+				for _, q := range m.Qualities {
+					if containsString(next, q) {
+						continue
+					}
+					m.PendingAired -= m.PendingByTier[q]
+					delete(m.PendingByTier, q)
+					delete(m.TierBackoff, q)
+				}
+				if m.PendingAired < 0 {
+					m.PendingAired = 0
+				}
+				m.Qualities = next
+			}
+			m.UpdatedAt = time.Now()
+			val, err := json.Marshal(m)
+			if err != nil {
+				return err
+			}
+			writes = append(writes, kv{append([]byte(nil), k...), val})
+			return nil
+		}); err != nil {
+			return err
+		}
+		for _, w := range writes {
+			if err := b.Put(w.k, w.v); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, nil, err
+	}
+	return len(writes), failedKeys, nil
+}
+
+func sameStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func containsString(list []string, s string) bool {
+	for _, v := range list {
+		if v == s {
+			return true
+		}
+	}
+	return false
 }
 
 // PutMonitored inserts or replaces a monitored item by its key.
