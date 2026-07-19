@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.0](https://github.com/dreulavelle/wisp/compare/v1.0.0...v1.1.0) (2026-07-19)
+
+
+### Features
+
+* **monitor:** log why a title can't pin yet instead of retrying silently ([#15](https://github.com/dreulavelle/wisp/issues/15)) ([c6ab8bf](https://github.com/dreulavelle/wisp/commit/c6ab8bf64b56085d9474760d587c7b37c0004e2b))
+
 ## [1.0.0](https://github.com/dreulavelle/wisp/compare/v0.7.1...v1.0.0) (2026-07-18)
 
 
