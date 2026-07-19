@@ -22,25 +22,39 @@ import (
 // Pin is now invoked concurrently (bounded per-episode fan-out), so all mutable
 // state is guarded by mu.
 type fakeFul struct {
-	mu       sync.Mutex
-	pinned   map[PinKey]bool
-	noStream map[[2]int]bool // (season,episode) with no playable stream
-	calls    int
+	mu        sync.Mutex
+	pinned    map[PinKey]bool
+	noStream  map[[2]int]bool // (season,episode) with no playable stream → NoResults
+	noQuality map[string]bool // canonical quality absent for the whole title → NoQualityMatch
+	failEp    map[[2]int]bool // (season,episode) whose Pin is a genuine fault
+	calls     int
 }
 
 func newFakeFul() *fakeFul {
-	return &fakeFul{pinned: map[PinKey]bool{}, noStream: map[[2]int]bool{}}
+	return &fakeFul{
+		pinned:    map[PinKey]bool{},
+		noStream:  map[[2]int]bool{},
+		noQuality: map[string]bool{},
+		failEp:    map[[2]int]bool{},
+	}
 }
 
-func (f *fakeFul) Pin(_ context.Context, t Target) (bool, error) {
+func (f *fakeFul) Pin(_ context.Context, t Target) (PinOutcome, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls++
-	if f.noStream[[2]int{t.Season, t.Episode}] {
-		return false, nil
+	q := library.NormalizeQuality(t.Quality)
+	if f.failEp[[2]int{t.Season, t.Episode}] {
+		return NoResults, errors.New("resolver fault")
 	}
-	f.pinned[PinKey{t.Season, t.Episode, library.NormalizeQuality(t.Quality)}] = true
-	return true, nil
+	if f.noQuality[q] {
+		return NoQualityMatch, nil // results exist, but not at this resolution
+	}
+	if f.noStream[[2]int{t.Season, t.Episode}] {
+		return NoResults, nil
+	}
+	f.pinned[PinKey{t.Season, t.Episode, q}] = true
+	return Pinned, nil
 }
 
 func (f *fakeFul) PinnedKeys(_ context.Context, _ string) (map[PinKey]bool, error) {
@@ -74,7 +88,7 @@ func testMonitor(t *testing.T, mux *http.ServeMux, ful Fulfiller, now time.Time)
 	t.Cleanup(srv.Close)
 	meta := metadata.New("v3key", []string{"US"}, metadata.WithBaseURLs(srv.URL, srv.URL, srv.URL))
 	st := newStore(t)
-	m := New(st, meta, ful, time.Hour, 4, slog.New(slog.DiscardHandler))
+	m := New(st, meta, ful, time.Hour, 4, 7*24*time.Hour, slog.New(slog.DiscardHandler))
 	m.now = func() time.Time { return now }
 	return m, st
 }
@@ -281,7 +295,7 @@ func TestForceRefreshOverridesFutureDueThenResumes(t *testing.T) {
 
 func TestMonitorRejectsUngatableMovie(t *testing.T) {
 	st := newStore(t)
-	m := New(st, metadata.New("", nil), newFakeFul(), time.Hour, 4, slog.New(slog.DiscardHandler)) // no TMDB key
+	m := New(st, metadata.New("", nil), newFakeFul(), time.Hour, 4, 7*24*time.Hour, slog.New(slog.DiscardHandler)) // no TMDB key
 	// tmdb-only movie, no imdb, no TMDB key → no way to gate release.
 	if err := m.Intake(context.Background(), Request{MediaType: "movie", TMDbID: "603", Title: "X"}); err == nil {
 		t.Fatal("expected rejection of ungatable tmdb-only movie")
@@ -318,7 +332,7 @@ func newInstrumentedFul(latency time.Duration) *instrumentedFul {
 	}
 }
 
-func (f *instrumentedFul) Pin(_ context.Context, t Target) (bool, error) {
+func (f *instrumentedFul) Pin(_ context.Context, t Target) (PinOutcome, error) {
 	n := f.inFlight.Add(1)
 	for { // publish the running peak
 		cur := f.maxInFlight.Load()
@@ -332,15 +346,15 @@ func (f *instrumentedFul) Pin(_ context.Context, t Target) (bool, error) {
 		time.Sleep(f.latency)
 	}
 	if f.failEp[[2]int{t.Season, t.Episode}] {
-		return false, errors.New("resolver hiccup")
+		return NoResults, errors.New("resolver hiccup")
 	}
 	if f.noStream[[2]int{t.Season, t.Episode}] {
-		return false, nil
+		return NoResults, nil
 	}
 	f.mu.Lock()
 	f.pinned[PinKey{t.Season, t.Episode, library.NormalizeQuality(t.Quality)}] = true
 	f.mu.Unlock()
-	return true, nil
+	return Pinned, nil
 }
 
 func (f *instrumentedFul) PinnedKeys(_ context.Context, _ string) (map[PinKey]bool, error) {
@@ -471,5 +485,201 @@ func TestSeriesEpisodeErrorDoesNotAbortOthers(t *testing.T) {
 		if !ful.pinned[PinKey{1, ep, "1080p"}] {
 			t.Fatalf("episode %d was not pinned despite E3 failing", ep)
 		}
+	}
+}
+
+// movieReleaseMux serves a movie whose home release is in the past (2026-01-01),
+// so processMovie proceeds straight to pinning against the test clock.
+func movieReleaseMux(tmdb string) *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/movie/"+tmdb+"/release_dates", func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte(`{"results":[{"iso_3166_1":"US","release_dates":[{"type":4,"release_date":"2026-01-01T00:00:00Z"}]}]}`))
+	})
+	return mux
+}
+
+func movieItem(imdb, tmdb string, qualities ...string) store.Monitored {
+	return store.Monitored{
+		Key: "movie:" + imdb, MediaType: "movie", IMDbID: imdb, TMDbID: tmdb,
+		Qualities: qualities, Enabled: true, Category: library.Root("movie", false),
+	}
+}
+
+// A tier that consistently returns NoQualityMatch (results exist, but not at this
+// resolution) accrues misses and its NextTry backs off exponentially from the base
+// interval, capped at tierBackoffMax; a successful pin of that tier resets it.
+func TestTierBackoffAccruesAndCaps(t *testing.T) {
+	ctx := context.Background()
+	ful := newFakeFul()
+	ful.noQuality["2160p"] = true // no 4K rips exist for this title
+	now := date("2026-06-01T00:00:00Z")
+	m, _ := testMonitor(t, movieReleaseMux("500"), ful, now) // interval = 1h
+	m.tierBackoffMax = 5 * time.Hour                         // cap after a few doublings
+
+	item := movieItem("tt5", "500", "1080p", "2160p")
+
+	// The exponential ramp from the 1h base, capped at 5h: 1h, 2h, 4h, 5h, 5h, …
+	wantDelays := []time.Duration{time.Hour, 2 * time.Hour, 4 * time.Hour, 5 * time.Hour, 5 * time.Hour}
+	for pass, want := range wantDelays {
+		res := m.processMovie(ctx, item)
+		st, ok := res.tierBackoff["2160p"]
+		if !ok {
+			t.Fatalf("pass %d: 2160p tier not backed off; map=%v", pass+1, res.tierBackoff)
+		}
+		if st.Misses != pass+1 {
+			t.Fatalf("pass %d: misses = %d, want %d", pass+1, st.Misses, pass+1)
+		}
+		if wantNext := now.Add(want); !st.NextTry.Equal(wantNext) {
+			t.Fatalf("pass %d: NextTry = %v, want now+%v", pass+1, st.NextTry, want)
+		}
+		// Every remaining target is the absent tier → DueAt follows the tier schedule.
+		if res.reason != store.DueReasonTierBackoff {
+			t.Fatalf("pass %d: reason = %q, want %q", pass+1, res.reason, store.DueReasonTierBackoff)
+		}
+		if wantDue := now.Add(want); !res.due.Equal(wantDue) {
+			t.Fatalf("pass %d: due = %v, want now+%v", pass+1, res.due, want)
+		}
+		item.TierBackoff = res.tierBackoff // thread state forward (persistResult would)
+	}
+
+	// 4K rips finally appear → a successful pin of 2160p resets the tier: both tiers
+	// pin, the movie completes, and no backoff state lingers.
+	ful.noQuality["2160p"] = false
+	res := m.processMovie(ctx, item)
+	if !res.completed {
+		t.Fatalf("movie should complete once every tier pins; res=%#v", res)
+	}
+	if _, ok := res.tierBackoff["2160p"]; ok {
+		t.Fatalf("2160p backoff must reset on a successful pin; map=%v", res.tierBackoff)
+	}
+}
+
+// A transient NoResults (no stream yet at all) must NOT accrue tier backoff — only
+// the specific NoQualityMatch signal does. The title stays on the fast cadence.
+func TestNoResultsDoesNotAccrueTierBackoff(t *testing.T) {
+	ctx := context.Background()
+	ful := newFakeFul()
+	ful.noStream[[2]int{0, 0}] = true // movie released but no stream yet (transient)
+	now := date("2026-06-01T00:00:00Z")
+	m, _ := testMonitor(t, movieReleaseMux("500"), ful, now) // interval = 1h
+
+	res := m.processMovie(ctx, movieItem("tt5", "500", "2160p"))
+
+	if len(res.tierBackoff) != 0 {
+		t.Fatalf("NoResults must not back off any tier; map=%v", res.tierBackoff)
+	}
+	if res.reason != store.DueReasonRetry {
+		t.Fatalf("reason = %q, want the fast retry ceiling %q", res.reason, store.DueReasonRetry)
+	}
+	if want := now.Add(time.Hour); !res.due.Equal(want) {
+		t.Fatalf("due = %v, want the tight interval %v", res.due, want)
+	}
+}
+
+// When every remaining target of a series is a backed-off tier, DueAt is driven by
+// the earliest tier NextTry — not the tight interval.
+func TestSeriesDueDrivenByBackedOffTier(t *testing.T) {
+	ctx := context.Background()
+	ful := newFakeFul()
+	ful.noQuality["2160p"] = true // no 4K rips for this show
+	now := date("2026-06-01T00:00:00Z")
+	m, _ := testMonitor(t, seriesEpisodesMux("tt7", 4), ful, now) // 4 aired episodes, none upcoming
+	m.resolveConcurrency = 4
+
+	// Pre-existing streak so the tier's NextTry is well past the tight interval.
+	item := seriesItem("tt7", "1080p", "2160p")
+	item.TierBackoff = map[string]store.TierBackoffState{"2160p": {Misses: 5, NextTry: now}}
+
+	res := m.processSeries(ctx, item)
+
+	// 1080p pins for all four → only 2160p remains, unanimously absent → backed off.
+	st := res.tierBackoff["2160p"]
+	if st.Misses != 6 {
+		t.Fatalf("misses = %d, want 6 (streak continued)", st.Misses)
+	}
+	// delay(6) from a 1h base = 32h.
+	if want := now.Add(32 * time.Hour); !res.due.Equal(want) {
+		t.Fatalf("due = %v, want the tier NextTry now+32h", res.due)
+	}
+	if res.reason != store.DueReasonTierBackoff {
+		t.Fatalf("reason = %q, want %q", res.reason, store.DueReasonTierBackoff)
+	}
+}
+
+// A normal-state tier (or a transient miss) keeps the whole title on the fast
+// cadence even while another tier is backed off.
+func TestSeriesNormalTierKeepsFastCadence(t *testing.T) {
+	ctx := context.Background()
+	ful := newFakeFul()
+	ful.noQuality["2160p"] = true     // 4K absent (would back off)
+	ful.noStream[[2]int{1, 2}] = true // but E2's 1080p has no stream yet (transient, normal)
+	now := date("2026-06-01T00:00:00Z")
+	m, _ := testMonitor(t, seriesEpisodesMux("tt7", 4), ful, now)
+	m.resolveConcurrency = 4
+
+	item := seriesItem("tt7", "1080p", "2160p")
+	item.TierBackoff = map[string]store.TierBackoffState{"2160p": {Misses: 5, NextTry: now}}
+
+	res := m.processSeries(ctx, item)
+
+	// A normal (1080p) target still pending → fast cadence at now+interval, NOT the
+	// far 2160p tier schedule.
+	if res.reason != store.DueReasonRetry {
+		t.Fatalf("reason = %q, want the fast retry %q", res.reason, store.DueReasonRetry)
+	}
+	if want := now.Add(time.Hour); !res.due.Equal(want) {
+		t.Fatalf("due = %v, want the tight interval %v (a normal tier still pends)", res.due, want)
+	}
+	// 2160p still accrues its miss in the background (readable for later surfacing).
+	if st := res.tierBackoff["2160p"]; st.Misses != 6 {
+		t.Fatalf("2160p misses = %d, want 6 (still absent across the title)", st.Misses)
+	}
+}
+
+// The per-tier tally is correct under the parallel episode loop: with many aired
+// episodes resolved concurrently, an absent tier is detected as unanimously
+// missing exactly once (misses=1), and a present tier is never falsely backed off.
+// Run under -race to prove the aggregation is race-free.
+func TestTierTallyConcurrencySafe(t *testing.T) {
+	ctx := context.Background()
+	ful := newFakeFul()
+	ful.noQuality["2160p"] = true
+	now := date("2026-06-01T00:00:00Z")
+	m, _ := testMonitor(t, seriesEpisodesMux("tt7", 12), ful, now)
+	m.resolveConcurrency = 8
+
+	res := m.processSeries(ctx, seriesItem("tt7", "1080p", "2160p"))
+
+	if st, ok := res.tierBackoff["2160p"]; !ok || st.Misses != 1 {
+		t.Fatalf("2160p backoff = %#v (ok=%v), want misses=1", res.tierBackoff["2160p"], ok)
+	}
+	if _, ok := res.tierBackoff["1080p"]; ok {
+		t.Fatalf("1080p pinned for every episode; must not be backed off; map=%v", res.tierBackoff)
+	}
+	if res.pendingAired != 12 {
+		t.Fatalf("pendingAired = %d, want 12 (2160p missing for every episode)", res.pendingAired)
+	}
+}
+
+// A tier that is only partially absent (present for some episodes) is NOT a hard
+// backoff — the resolution demonstrably exists for the title, so the fast cadence
+// is kept and no miss accrues.
+func TestPartialTierAbsenceDoesNotBackOff(t *testing.T) {
+	ctx := context.Background()
+	ful := newFakeFul()
+	// 2160p exists for E1 (pre-pinned), absent everywhere else — not unanimous.
+	ful.pinned[PinKey{1, 1, "2160p"}] = true
+	ful.noQuality["2160p"] = true
+	now := date("2026-06-01T00:00:00Z")
+	m, _ := testMonitor(t, seriesEpisodesMux("tt7", 4), ful, now)
+	m.resolveConcurrency = 4
+
+	res := m.processSeries(ctx, seriesItem("tt7", "2160p"))
+
+	if len(res.tierBackoff) != 0 {
+		t.Fatalf("partial absence must not back off (E1 has 2160p); map=%v", res.tierBackoff)
+	}
+	if res.reason != store.DueReasonRetry {
+		t.Fatalf("reason = %q, want fast retry %q", res.reason, store.DueReasonRetry)
 	}
 }
