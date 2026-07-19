@@ -99,6 +99,89 @@ The mount does not permit creating, modifying, or renaming media files.
   "mounted": true, "mount_path": "/mnt/wisp" }
 ```
 
+---
+
+## `GET /api/requests/status`
+
+wisp's view of one title, computed from the monitor record and the pin store —
+no network calls. Identify the title with `media_type` + `tmdb_id`, falling back
+to `imdb_id`. A `404` means wisp is not tracking it (no monitor, no pins) and the
+caller should (re)submit via `POST /api/add`.
+
+```sh
+curl "http://localhost:8080/api/requests/status?media_type=movie&tmdb_id=27205"
+```
+
+```json
+{
+  "state": "completed",
+  "pinned_qualities": ["1080p", "2160p"],
+  "pinned_paths": [
+    "movies/Inception (2010) [tmdb-27205]/Inception (2010) - [1080p].mkv",
+    "movies/Inception (2010) [tmdb-27205]/Inception (2010) - [2160p].mkv"
+  ],
+  "detail": "requested scope pinned",
+  "request_ref": "silo-1234"
+}
+```
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `state` | string | `queued` (tracked, nothing in scope pinned yet — includes unreleased/unaired), `completed` (requested scope pinned and servable), or `failed` (permanent give-up on an unresolvable identity) |
+| `pinned_qualities` | string[] | Sorted, unique resolution tiers that have a servable pin |
+| `pinned_paths` | string[] | Virtual paths of those servable pins, in the same order wisp stores them — one entry per pinned file, so a caller can map a tier to the exact file the mount exposes. Omitted when nothing is pinned |
+| `detail` | string | Why the title is in this state (e.g. `awaiting home-media release`, `resolving stream`) |
+| `request_ref` | string | Echoes the `request_ref` from intake, when one was supplied |
+
+Only **servable** pins count — a pin whose stream has gone is neither
+`completed` nor listed in `pinned_paths`.
+
+---
+
+## `GET /api/ws`
+
+WebSocket endpoint (`ws://<host>:8080/api/ws`) that pushes an event whenever a
+pin becomes playable. It exists for the [lazy-resolution](Configuration.md#lazy-resolution)
+flow: a 1-byte placeholder is cataloged instantly, and this event is how a
+media-server plugin learns to rescan and promote that entry to its real size.
+
+wisp broadcasts `pin_completed` when:
+
+- a pin resolves eagerly (`POST /api/add` or a scheduler pass),
+- a placeholder pin is created, and
+- a placeholder resolves on first playback.
+
+A [self-heal](Architecture.md#the-self-heal-model) re-resolve does **not** emit an
+event — the virtual path the media server already holds is unchanged.
+
+**Event payload**
+
+```json
+{
+  "event": "pin_completed",
+  "media_type": "series",
+  "imdb_id": "tt38262097",
+  "tmdb_id": "215061",
+  "tvdb_id": "441314",
+  "virtual_path": "shows/Show (2026) [tvdb-441314]/Season 01/Show (2026) - S01E04 - [1080p].mkv"
+}
+```
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `event` | string | Always `pin_completed` today |
+| `media_type` | string | `movie` or `series` |
+| `imdb_id` | string | The id wisp searched with — `tt…`, or `tmdb:…` for a tmdb-only title |
+| `tmdb_id` / `tvdb_id` | string | Enriched from Cinemeta when only an IMDb id was known; either may be empty |
+| `virtual_path` | string | Path relative to the library root — append it to `WISP_NOTIFY_MOUNT_PATH` for the on-disk path |
+
+**Keepalive.** wisp ignores anything a client sends, but it does require the
+client to send *something*: a connection with no inbound frame for **120
+seconds** is closed. Without this a client that vanishes without a TCP FIN
+(laptop sleep, wifi drop, NAT rebind) would hold its slot forever. Send any
+frame (a `ping` string is fine) on a shorter interval — 30–60 s — and reconnect
+on close.
+
 ## `GET /metrics`
 
 Prometheus text-format metrics: `wisp_pins`, `wisp_mounted`, `wisp_uptime_seconds`,

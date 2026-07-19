@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dreulavelle/wisp/internal/aiostreams"
 	"github.com/dreulavelle/wisp/internal/metadata"
 	"github.com/dreulavelle/wisp/internal/monitor"
 	"github.com/dreulavelle/wisp/internal/notify"
@@ -116,3 +117,98 @@ func TestLazyResolution(t *testing.T) {
 		t.Fatalf("expected 0 pinned keys for placeholder pins, got %d", len(keys))
 	}
 }
+
+// A monitor created without an explicit quality list writes its placeholder under
+// the "1080p" default label, but resolves best-available — so the real stream can
+// land at a different tier and therefore a different virtual path. The upgrade
+// must retire the placeholder rather than orphan a 1-byte file the media server
+// has already imported.
+func TestLazyResolutionUpgradeRetiresPlaceholder(t *testing.T) {
+	backend := wispTestBackend(t)
+	defer backend.Close()
+
+	a := testApp(t)
+	a.lazyResolution = true
+	a.aio = aiostreams.New(backend.URL+"/stremio/uuid/blob/manifest.json", "pw")
+	a.prober = testProber()
+	renames := make(chan [2]string, 4)
+	a.webhook = recordingNotifier{renames: renames}
+
+	// No Quality: the placeholder labels itself 1080p, the resolve is
+	// unconstrained and takes the top-ranked 2160p stream.
+	target := monitor.Target{
+		MediaType: "movie", IMDbID: "tt1375666", TMDbID: "27205", // TMDbID skips Cinemeta
+		Title: "Inception", Year: 2010, Category: "movies",
+	}
+
+	if outcome, err := a.Pin(context.Background(), target); err != nil || outcome != monitor.Pinned {
+		t.Fatalf("placeholder Pin = %v, %v", outcome, err)
+	}
+	pins, err := a.store.PinsByMedia(context.Background(), "tt1375666")
+	if err != nil || len(pins) != 1 {
+		t.Fatalf("pins after placeholder = %d (err %v), want 1", len(pins), err)
+	}
+	placeholderPath := pins[0].VirtualPath
+	if pins[0].SourceURL != "" || pins[0].Quality != "1080p" {
+		t.Fatalf("placeholder = %#v, want empty SourceURL at the 1080p default", pins[0])
+	}
+
+	// Second Pin takes the upgrade branch: resolve for real.
+	if outcome, err := a.Pin(context.Background(), target); err != nil || outcome != monitor.Pinned {
+		t.Fatalf("upgrade Pin = %v, %v", outcome, err)
+	}
+
+	pins, err = a.store.PinsByMedia(context.Background(), "tt1375666")
+	if err != nil {
+		t.Fatalf("PinsByMedia failed: %v", err)
+	}
+	if len(pins) != 1 {
+		var paths []string
+		for _, p := range pins {
+			paths = append(paths, p.VirtualPath)
+		}
+		t.Fatalf("pins after upgrade = %d %v, want exactly 1 (placeholder retired)", len(pins), paths)
+	}
+	resolved := pins[0]
+	if resolved.VirtualPath == placeholderPath {
+		t.Fatalf("resolved pin kept the placeholder path %q", placeholderPath)
+	}
+	if resolved.SourceURL == "" || resolved.Quality != "2160p" {
+		t.Fatalf("resolved pin = %#v, want a 2160p pin with a SourceURL", resolved)
+	}
+	if p, _ := a.store.ByPath(context.Background(), placeholderPath); p != nil {
+		t.Fatalf("orphaned placeholder still in store at %q", placeholderPath)
+	}
+
+	// The media server imported the placeholder, so it must be told this is a
+	// rename — not left holding a phantom entry that never gets a delete.
+	select {
+	case r := <-renames:
+		if r[0] != placeholderPath || r[1] != resolved.VirtualPath {
+			t.Fatalf("rename webhook = %q → %q, want %q → %q", r[0], r[1], placeholderPath, resolved.VirtualPath)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("no rename webhook for the retired placeholder")
+	}
+
+	// Now that it is really resolved, the scheduler must see it as pinned.
+	keys, err := a.PinnedKeys(context.Background(), "tt1375666")
+	if err != nil || len(keys) != 1 {
+		t.Fatalf("PinnedKeys after upgrade = %d (err %v), want 1", len(keys), err)
+	}
+}
+
+// recordingNotifier captures Rename calls; Import/Delete are no-ops. Unlike the
+// real notifier it delivers synchronously, so a test never races the fanout.
+type recordingNotifier struct {
+	renames chan [2]string
+}
+
+func (n recordingNotifier) Import(context.Context, string, string) {}
+func (n recordingNotifier) Rename(_ context.Context, _, previousPath, newPath string) {
+	select {
+	case n.renames <- [2]string{previousPath, newPath}:
+	default:
+	}
+}
+func (n recordingNotifier) Delete(context.Context, string, string) {}

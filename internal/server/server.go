@@ -22,6 +22,7 @@ import (
 
 	"github.com/dreulavelle/wisp/internal/library"
 	"github.com/dreulavelle/wisp/internal/store"
+	"golang.org/x/sync/singleflight"
 )
 
 // ReResolve refreshes a pin's SourceURL/Size in place (e.g. by re-searching
@@ -50,6 +51,13 @@ type Server struct {
 	// dominates stream-start latency (ffmpeg's probe makes many small reads).
 	linkMu    sync.Mutex
 	linkCache map[string]cachedLink
+
+	// placeholderGroup collapses concurrent first-playback resolutions of the
+	// same placeholder onto a single AIOStreams search + probe round. A player
+	// opening a file issues several parallel range requests, and a media server
+	// probing a new import adds more; without this each one would fan out into
+	// its own uncached search.
+	placeholderGroup singleflight.Group
 
 	// Observability counters.
 	reqServed   atomic.Int64
@@ -212,18 +220,17 @@ func (s *Server) serveDir(w http.ResponseWriter, r *http.Request, rel string) {
 
 func (s *Server) serveFile(w http.ResponseWriter, r *http.Request, pin *store.Pin) {
 	if pin.SourceURL == "" {
-		if s.reresolve != nil {
-			s.log.Warn("placeholder pin requested; resolving", "path", pin.VirtualPath)
-			s.reResolves.Add(1)
-			if err := s.reresolve(r.Context(), pin); err != nil {
-				s.log.Error("resolution failed", "path", pin.VirtualPath, "error", err)
-				http.Error(w, "stream temporarily unavailable", http.StatusBadGateway)
-				return
-			}
-		} else {
+		if s.reresolve == nil {
 			http.Error(w, "no resolver configured for placeholder", http.StatusInternalServerError)
 			return
 		}
+		resolved, err := s.resolvePlaceholder(r.Context(), pin)
+		if err != nil {
+			s.log.Error("resolution failed", "path", pin.VirtualPath, "error", err)
+			http.Error(w, "stream temporarily unavailable", http.StatusBadGateway)
+			return
+		}
+		pin = resolved
 	}
 
 	if r.Method == http.MethodHead {
@@ -276,6 +283,35 @@ func (s *Server) serveFile(w http.ResponseWriter, r *http.Request, pin *store.Pi
 	}
 	s.log.Error("stream unavailable after re-resolve", "path", pin.VirtualPath)
 	http.Error(w, "stream temporarily unavailable", http.StatusBadGateway)
+}
+
+// resolvePlaceholder resolves a pin that has no SourceURL yet (lazy resolution),
+// returning the resolved pin. Concurrent readers of the same virtual path share
+// one resolution: the winner runs it, the losers wait and receive its result.
+//
+// The shared call runs on a context detached from the winning request so a
+// player that hangs up mid-resolve doesn't cancel the resolution every other
+// reader is waiting on. It stays bounded by the AIOStreams client and probe
+// timeouts rather than by any one client's connection.
+func (s *Server) resolvePlaceholder(ctx context.Context, pin *store.Pin) (*store.Pin, error) {
+	v, err, shared := s.placeholderGroup.Do(pin.VirtualPath, func() (any, error) {
+		s.log.Warn("placeholder pin requested; resolving", "path", pin.VirtualPath)
+		s.reResolves.Add(1)
+		// Resolve into a copy: the result is shared with every waiter, so the
+		// caller's own pin must not be mutated concurrently by the winner.
+		p := *pin
+		if err := s.reresolve(context.WithoutCancel(ctx), &p); err != nil {
+			return nil, err
+		}
+		return &p, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	if shared {
+		s.log.Debug("shared placeholder resolution", "path", pin.VirtualPath)
+	}
+	return v.(*store.Pin), nil
 }
 
 // proxyOnce streams upstreamURL once. committed reports the response was written

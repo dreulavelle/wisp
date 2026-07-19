@@ -203,6 +203,9 @@ type app struct {
 	wsClientsMu    sync.Mutex
 	wsClients      map[*websocket.Conn]chan []byte
 	lazyResolution bool
+	// wsReadTimeoutOverride shortens the WebSocket idle eviction window; zero
+	// means defaultWSReadTimeout. Only tests set it.
+	wsReadTimeoutOverride time.Duration
 }
 
 type addRequest struct {
@@ -622,16 +625,40 @@ var (
 // keeps the pin's quality tier so a self-heal doesn't swap 4K for 1080p under a
 // file named [2160p]; if that tier has vanished it falls back to the best
 // available so playback still survives.
+//
+// It serves two callers, told apart by whether the pin already has a SourceURL:
+// the dead-link self-heal, and the first playback of a lazy-resolution
+// placeholder. Only the former bypasses the AIOStreams search cache — a
+// placeholder has never resolved, so it has no stale result to bust, and a
+// cache-busting search there would just cost a full upstream round-trip on a
+// path a player is actively waiting on.
 func (a *app) reResolve(ctx context.Context, p *store.Pin) error {
-	sourceURL, size, _, _, err := a.resolve(ctx, p.MediaType, p.IMDbID, p.Season, p.Episode, library.NormalizeQuality(p.Quality), true)
+	placeholder := p.SourceURL == ""
+	fresh := !placeholder
+	sourceURL, size, _, _, err := a.resolve(ctx, p.MediaType, p.IMDbID, p.Season, p.Episode, library.NormalizeQuality(p.Quality), fresh)
 	if errors.Is(err, errNoQualityMatch) {
-		sourceURL, size, _, _, err = a.resolve(ctx, p.MediaType, p.IMDbID, p.Season, p.Episode, "", true)
+		sourceURL, size, _, _, err = a.resolve(ctx, p.MediaType, p.IMDbID, p.Season, p.Episode, "", fresh)
 	}
 	if err != nil {
 		return err
 	}
 	p.SourceURL, p.Size = sourceURL, size
-	return a.store.UpdateResolution(ctx, p.VirtualPath, sourceURL, size)
+	if err := a.store.UpdateResolution(ctx, p.VirtualPath, sourceURL, size); err != nil {
+		return err
+	}
+	// A placeholder just became a real, full-size file. pin_completed is how the
+	// media-server plugin learns to rescan and promote the 1-byte catalog entry,
+	// so the on-demand resolve must emit it exactly like the eager pin does —
+	// otherwise the "resolve on first playback" half of lazy resolution completes
+	// silently and the catalog keeps the placeholder size.
+	//
+	// A self-heal deliberately does not broadcast: the virtual path the media
+	// server already holds is unchanged, so the event would be pure noise, and a
+	// flaky upstream can self-heal repeatedly within one playback.
+	if placeholder {
+		a.broadcastPinCompleted(p.MediaType, p.IMDbID, p.TMDbID, p.TVDbID, p.VirtualPath)
+	}
+	return nil
 }
 
 // resolve picks the highest-ranked stream whose resolver can serve media and
@@ -775,6 +802,23 @@ type wsPinMessage struct {
 	VirtualPath string `json:"virtual_path"`
 }
 
+// defaultWSReadTimeout bounds how long a WebSocket client may stay silent before
+// wisp evicts it. golang.org/x/net/websocket has no ping/pong keepalive, so a
+// client that vanishes without a FIN (laptop sleep, wifi drop, NAT rebind) would
+// otherwise leave Receive blocked forever, holding its connection, its writer
+// goroutine, and its wsClients entry for the process lifetime — unbounded across
+// reconnects. Clients must therefore send *something* (any frame) more often
+// than this; see docs/API-Reference.md.
+const defaultWSReadTimeout = 120 * time.Second
+
+// wsReadTimeout is defaultWSReadTimeout unless a test shortened it.
+func (a *app) wsReadTimeout() time.Duration {
+	if a.wsReadTimeoutOverride > 0 {
+		return a.wsReadTimeoutOverride
+	}
+	return defaultWSReadTimeout
+}
+
 func (a *app) handleWS(ws *websocket.Conn) {
 	ch := make(chan []byte, 256)
 	a.wsClientsMu.Lock()
@@ -795,7 +839,9 @@ func (a *app) handleWS(ws *websocket.Conn) {
 		a.log.Info("ws client disconnected", "remote", ws.Request().RemoteAddr)
 	}()
 
-	// Start a writer goroutine that serializes writes to the WebSocket connection
+	// Start a writer goroutine that serializes writes to the WebSocket connection.
+	// A failed send closes the conn, which unblocks the read loop below so the
+	// deferred cleanup removes the wsClients entry and cancels this goroutine.
 	go func() {
 		for {
 			select {
@@ -814,9 +860,16 @@ func (a *app) handleWS(ws *websocket.Conn) {
 		}
 	}()
 
+	// Read loop: wisp ignores client payloads, but reading is how a closed or
+	// half-open connection is detected. The deadline is refreshed on every
+	// successful receive, so an active client is never evicted; a silent one is.
 	var msg string
 	for {
+		if err := ws.SetReadDeadline(time.Now().Add(a.wsReadTimeout())); err != nil {
+			break
+		}
 		if err := websocket.Message.Receive(ws, &msg); err != nil {
+			a.log.Debug("ws read ended", "remote", ws.Request().RemoteAddr, "error", err)
 			break
 		}
 	}

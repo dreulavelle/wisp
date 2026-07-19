@@ -46,12 +46,13 @@ func (a *app) Pin(ctx context.Context, t monitor.Target) (monitor.PinOutcome, er
 		// If the placeholder already exists, let the background scheduler try to resolve it eagerly.
 		existing, err := a.store.ByPath(ctx, vpath)
 		if err == nil && existing != nil {
-			_, _, err := a.pin(ctx, pinSpec{
+			resolvedPath, _, err := a.pin(ctx, pinSpec{
 				MediaType: t.MediaType, IMDbID: searchID, TMDbID: t.TMDbID, TVDbID: t.TVDbID,
 				Title: t.Title, Year: t.Year, Season: t.Season, Episode: t.Episode, Quality: t.Quality,
 				Category: t.Category,
 			})
 			if err == nil {
+				a.retirePlaceholder(ctx, t.MediaType, existing.VirtualPath, resolvedPath)
 				return monitor.Pinned, nil
 			}
 			outcome, reason := pinOutcome(err)
@@ -99,6 +100,38 @@ func (a *app) Pin(ctx context.Context, t monitor.Target) (monitor.PinOutcome, er
 		"media_type", t.MediaType, "imdb", t.IMDbID, "season", t.Season,
 		"episode", t.Episode, "quality", t.Quality)
 	return outcome, nil // nothing (at this quality) to pin yet
+}
+
+// retirePlaceholder removes the placeholder a lazy Pin created once the real
+// resolution has landed at a different virtual path, and tells the media server
+// to treat it as a rename rather than leaving a phantom 1-byte entry it already
+// imported.
+//
+// pin() only supersedes an old path at the *same* quality tier (distinct tiers
+// are legitimately concurrent targets and must coexist), so it cannot clean up
+// after a placeholder whose label was the "1080p" default while the resolve —
+// running with the monitor's empty/best-available quality — landed on another
+// tier. Deleting only the exact path we looked up keeps sibling tiers intact.
+//
+// A no-op when pin() already superseded the path itself: Delete then reports
+// nothing removed and the Rename webhook has already been sent.
+func (a *app) retirePlaceholder(ctx context.Context, mediaType, placeholderPath, resolvedPath string) {
+	if placeholderPath == "" || resolvedPath == "" || placeholderPath == resolvedPath {
+		return
+	}
+	// Mirror pin()'s discipline: serialize the store mutation, notify outside the lock.
+	a.pinMu.Lock()
+	deleted, err := a.store.Delete(ctx, placeholderPath)
+	a.pinMu.Unlock()
+	if err != nil {
+		a.log.Warn("remove superseded placeholder", "path", placeholderPath, "error", err)
+		return
+	}
+	if !deleted {
+		return
+	}
+	a.log.Info("placeholder resolved to a new path", "from", placeholderPath, "to", resolvedPath)
+	a.webhook.Rename(ctx, mediaType, placeholderPath, resolvedPath)
 }
 
 // pinOutcome classifies an "unable to pin yet" error into a monitor.PinOutcome and

@@ -29,7 +29,6 @@ All configuration is via environment variables.
 | `WISP_READ_CHUNK_SIZE_LIMIT` | `512M` | Cap for the read-chunk ramp. |
 | `WISP_LAZY_RESOLUTION` | `false` | Enable/disable lazy placeholder resolution (creates 1-byte placeholder immediately, resolves on-demand or in background). |
 
-
 ## AIOStreams URL & auth
 
 You only fill in two things: `WISP_AIOSTREAMS_URL` (your manifest URL) and
@@ -102,3 +101,9 @@ When `WISP_LAZY_RESOLUTION` is enabled (`true`), Wisp immediately writes a 1-byt
 
 When a client attempts playback of a placeholder, Wisp intercepts the read request, resolves the stream from AIOStreams, and updates the pin with the real stream URL and size. The scheduler also periodically pre-resolves placeholders in the background once they are eligible (past release date), updating their pins and size.
 
+Either way, the resolution emits a `pin_completed` event on
+[`GET /api/ws`](API-Reference.md#get-apiws) — that is how a media-server plugin
+learns to rescan and promote the entry from its 1-byte placeholder to the real
+file. If the resolved stream lands at a different quality tier than the
+placeholder's default label, the placeholder is deleted and a rename is sent to
+the configured notification targets, so no phantom entry is left behind.
