@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/dreulavelle/wisp/internal/library"
 )
 
 // Config holds everything Wisp needs to serve a resolver-backed library.
@@ -92,6 +94,18 @@ type Config struct {
 	// ScheduleInterval, never more than once per this duration — so wisp backs off
 	// hard yet still catches a late release. Falls back on empty/unparseable input.
 	TierBackoffMax time.Duration
+	// MinQuality is the lowest resolution tier wisp will request (WISP_MIN_QUALITY,
+	// default 1080p). A request below it is raised to it — a caller asking for 720p
+	// gets a strictly better file rather than a rejection. It is a floor on
+	// *requested* tiers only: a request that names no tier still means "best
+	// available" and stays unconstrained. Unrecognized input falls back to 1080p.
+	MinQuality string
+	// Allow2160p opts into 4K (WISP_ALLOW_2160P, default false). While disabled,
+	// 2160p is stripped from every intake, so it is never requested, never scraped,
+	// and never surfaced; a request naming ONLY 2160p is rejected outright rather
+	// than turned into a monitor that can never be satisfied.
+	Allow2160p bool
+
 	// TMDBAPIKey enables home-media release gating via TMDB (v3 key or v4 token).
 	TMDBAPIKey string
 	// TMDBMarkets is the ordered list of ISO-3166-1 regions whose digital/
@@ -146,6 +160,8 @@ func Load() (*Config, error) {
 		ScheduleInterval:     durationEnv("WISP_SCHEDULE_INTERVAL", 2*time.Hour),
 		ResolveConcurrency:   clampInt(intEnv("WISP_RESOLVE_CONCURRENCY", 4), 1, 16),
 		TierBackoffMax:       durationEnv("WISP_TIER_BACKOFF_MAX", 7*24*time.Hour),
+		MinQuality:           qualityEnv("WISP_MIN_QUALITY", "1080p"),
+		Allow2160p:           boolEnv("WISP_ALLOW_2160P", false),
 		TMDBAPIKey:           strings.TrimSpace(os.Getenv("WISP_TMDB_API_KEY")),
 		TMDBMarkets:          listEnv("WISP_TMDB_MARKETS", []string{"US", "CA", "GB", "AU", "DE", "FR", "IT", "ES", "JP", "IN"}),
 		ProbeConcurrency:     clampInt(intEnv("WISP_PROBE_CONCURRENCY", 8), 1, 32),
@@ -165,6 +181,20 @@ func Load() (*Config, error) {
 	// becomes an error in a future major, so flag it for the caller to warn on.
 	c.NotifyMountPathDefaulted = c.NotifyMountPath == "" && c.notifyEnabled()
 	return c, nil
+}
+
+// QualityPolicy is the tier policy the intake paths enforce.
+func (c *Config) QualityPolicy() library.QualityPolicy {
+	return library.QualityPolicy{Min: c.MinQuality, Allow2160p: c.Allow2160p}
+}
+
+// qualityEnv parses a resolution tier ("1080p", "4k", …) into wisp's canonical
+// vocabulary, falling back on empty or unrecognized input.
+func qualityEnv(key, fallback string) string {
+	if q := library.NormalizeQuality(os.Getenv(key)); q != "" {
+		return q
+	}
+	return fallback
 }
 
 // notifyEnabled reports whether at least one media-server notification target

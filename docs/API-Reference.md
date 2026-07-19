@@ -60,7 +60,7 @@ Resolve a title via AIOStreams, pin the top stream, and create its virtual file.
 | `year` | number | – | Used for the folder/file name |
 | `season` | number | series | |
 | `episode` | number | series | |
-| `quality` | string | – | Omit → pin AIOStreams' top stream and label it with the resolution it returned. Set (`1080p`, `2160p`/`4k`, …) → pin a stream **of that resolution**, so `1080p` and `2160p` of one title become two distinct files |
+| `quality` | string | – | Omit → pin AIOStreams' top stream and label it with the resolution it returned. Set (`1080p`, `2160p`/`4k`, …) → pin a stream **of that resolution**, so `1080p` and `2160p` of one title become two distinct files. Subject to the quality policy: a tier below `WISP_MIN_QUALITY` is raised to it, and `2160p` is rejected while `WISP_ALLOW_2160P` is off |
 
 **Responses**
 
@@ -78,7 +78,15 @@ Resolve a title via AIOStreams, pin the top stream, and create its virtual file.
   | `500` | `aiostreams_auth` | AIOStreams rejected credentials (401/403) | fix `WISP_AIOSTREAMS_PASSWORD` — do not silently retry |
   | `429` | `rate_limited` | AIOStreams throttled (echoes `Retry-After`) | back off |
   | `503` | `upstream_unavailable` | transient 5xx / unreachable | retry later |
+  | `422` | `quality_not_allowed` | every requested tier is disabled by wisp's quality policy — in practice a 2160p-only request while `WISP_ALLOW_2160P` is off | **permanent — mark the request failed and close it.** Retrying will never succeed |
   | `400` | – | invalid body / missing required field | fix the request |
+
+  Note the split: the `5xx`/`429` codes all describe **upstream** conditions a
+  feeder should keep polling through. `quality_not_allowed` is the one
+  machine-readable **permanent, local** rejection — a `4xx` with no
+  `Retry-After` — so the ordinary "`4xx` = give up, `5xx`/`429` = retry" rule
+  closes the request rather than looping on it. See
+  [4K opt-in](Configuration.md#4k-opt-in).
 
 ```sh
 curl -X POST http://localhost:8080/api/add -d '{
@@ -168,11 +176,32 @@ curl "http://localhost:8080/api/requests/status?media_type=movie&tmdb_id=27205"
 | `state` | string | `queued` (tracked, nothing in scope pinned yet — includes unreleased/unaired), `completed` (requested scope pinned and servable), or `failed` (permanent give-up on an unresolvable identity) |
 | `pinned_qualities` | string[] | Sorted, unique resolution tiers that have a servable pin |
 | `pinned_paths` | string[] | Virtual paths of those servable pins, in the same order wisp stores them — one entry per pinned file, so a caller can map a tier to the exact file the mount exposes. Omitted when nothing is pinned |
-| `detail` | string | Why the title is in this state (e.g. `awaiting home-media release`, `resolving stream`) |
+| `detail` | string | Why the title is in this state (e.g. `awaiting home-media release`, `resolving stream`), including any tier that was given up on |
 | `request_ref` | string | Echoes the `request_ref` from intake, when one was supplied |
 
 Only **servable** pins count — a pin whose stream has gone is neither
 `completed` nor listed in `pinned_paths`.
+
+### Tiers that never materialize
+
+A requested tier that simply does not exist (a 2160p request for a title with no
+4K rips) must not hold a request open for ever. Once the scheduler's per-tier
+backoff for that tier has saturated at `WISP_TIER_BACKOFF_MAX` — meaning every
+aired episode reported "results exist, but none at this resolution", repeatedly,
+over days — the tier stops counting toward completion, and `detail` names it:
+
+```json
+{
+  "state": "completed",
+  "pinned_qualities": ["1080p"],
+  "detail": "requested scope pinned; gave up on 2160p (no releases found at that quality after repeated checks)"
+}
+```
+
+The monitor still retries the tier for ever in the background (wisp never
+permanently abandons one), so a late 4K release is still pinned — the title just
+stops reporting `queued` in the meantime. A title with **nothing** servable
+pinned is never `completed`, however hopeless its tiers are.
 
 ---
 

@@ -295,3 +295,46 @@ func TestLoadAPIToken(t *testing.T) {
 		t.Fatalf("APIToken = %q, want %q (trimmed)", c.APIToken, "s3cret")
 	}
 }
+
+// The shipped defaults are a 1080p floor with 4K OFF: an operator who sets
+// nothing must not have wisp requesting or scraping 2160p.
+func TestLoadQualityPolicyDefaults(t *testing.T) {
+	t.Setenv("WISP_AIOSTREAMS_URL", "https://host/stremio/uuid/blob/manifest.json")
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.MinQuality != "1080p" {
+		t.Fatalf("MinQuality = %q, want 1080p", c.MinQuality)
+	}
+	if c.Allow2160p {
+		t.Fatal("Allow2160p defaults to true; 4K must be opt-in")
+	}
+	p := c.QualityPolicy()
+	if p.Min != "1080p" || p.Allow2160p {
+		t.Fatalf("QualityPolicy() = %#v, want {Min:1080p Allow2160p:false}", p)
+	}
+}
+
+// Both settings are overridable, and the tier label is canonicalized; garbage
+// falls back to the default rather than disabling the floor.
+func TestLoadQualityPolicyOverrides(t *testing.T) {
+	t.Setenv("WISP_AIOSTREAMS_URL", "https://host/stremio/uuid/blob/manifest.json")
+
+	t.Setenv("WISP_MIN_QUALITY", "720P")
+	t.Setenv("WISP_ALLOW_2160P", "true")
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.MinQuality != "720p" || !c.Allow2160p {
+		t.Fatalf("overrides = (%q, %v), want (720p, true)", c.MinQuality, c.Allow2160p)
+	}
+
+	t.Setenv("WISP_MIN_QUALITY", "potato")
+	if c, err = Load(); err != nil {
+		t.Fatal(err)
+	} else if c.MinQuality != "1080p" {
+		t.Fatalf("unparseable MinQuality = %q, want the 1080p fallback", c.MinQuality)
+	}
+}

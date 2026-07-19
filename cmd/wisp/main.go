@@ -62,6 +62,22 @@ func main() {
 			"pins_removed", len(paths))
 	}
 
+	// Bring stored monitors in line with the quality policy, so a disallowed tier
+	// stops being scraped rather than only being refused at intake.
+	qualityPolicy := cfg.QualityPolicy()
+	log.Info("quality policy", "min_quality", qualityPolicy.Min, "allow_2160p", qualityPolicy.Allow2160p)
+	if n, failed, err := st.ApplyQualityPolicy(context.Background(), qualityPolicy); err != nil {
+		log.Warn("quality policy migration", "error", err)
+	} else {
+		if n > 0 {
+			log.Info("quality policy applied to existing monitors", "monitors_updated", n)
+		}
+		if len(failed) > 0 {
+			log.Warn("monitors requested only a disallowed quality tier and were marked failed; they will report failed on /api/requests/status until re-requested at an allowed tier",
+				"monitors_failed", len(failed), "keys", failed)
+		}
+	}
+
 	notifier := notify.New(notify.Options{
 		ArrWebhookURL:  cfg.NotifyArrWebhookURL,
 		SiloWebhookURL: cfg.SiloWebhookURL,
@@ -95,6 +111,7 @@ func main() {
 			Timeout:     cfg.ProbeTimeout,
 		}, log),
 		startedAt: time.Now(),
+		quality:   qualityPolicy,
 	}
 	log.Info("probe limits", "concurrency", cfg.ProbeConcurrency, "window", cfg.ProbeWindow, "timeout", cfg.ProbeTimeout)
 	app.mon = monitor.New(st, app.meta, app, cfg.ScheduleInterval, cfg.ResolveConcurrency, cfg.TierBackoffMax, log)
@@ -265,6 +282,10 @@ type app struct {
 	prober    *prober
 	mountPath string
 	startedAt time.Time
+	// quality is the tier policy enforced on every intake path, so a tier the
+	// operator disallowed is never stored on a monitor and never scraped.
+	quality library.QualityPolicy
+
 	// pinMu serializes the store-mutation half of pin() (list → upsert → delete
 	// of superseded pins) so concurrent pins — API and scheduler — can't clobber
 	// each other. The network resolve runs outside it.
@@ -356,9 +377,16 @@ func (a *app) handleAdd(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "imdb_id and title are required", http.StatusBadRequest)
 		return
 	}
+	// The policy applies here too, or "4K is off" would leak: a direct pin scrapes
+	// and stores a 2160p file just as a monitor would.
+	quality, err := a.quality.ApplyOne(req.Quality)
+	if err != nil {
+		writeQualityPolicyError(w, a.log, req.MediaType, req.IMDbID, []string{req.Quality}, a.quality)
+		return
+	}
 	vpath, size, err := a.pin(r.Context(), pinSpec{
 		MediaType: req.MediaType, IMDbID: req.IMDbID, TMDbID: req.TMDbID, TVDbID: req.TVDbID,
-		Title: req.Title, Year: req.Year, Season: req.Season, Episode: req.Episode, Quality: req.Quality,
+		Title: req.Title, Year: req.Year, Season: req.Season, Episode: req.Episode, Quality: quality,
 	})
 	if err != nil {
 		writeAddError(w, a.log, req, err)
@@ -377,9 +405,15 @@ func (a *app) handleAddRequest(w http.ResponseWriter, r *http.Request, req addRe
 		http.Error(w, "imdb_id or tmdb_id is required", http.StatusBadRequest)
 		return
 	}
+	requested := req.qualities()
+	qualities, err := a.quality.Apply(requested)
+	if err != nil {
+		writeQualityPolicyError(w, a.log, req.MediaType, firstNonEmpty(req.IMDbID, req.TMDbID), requested, a.quality)
+		return
+	}
 	if err := a.mon.Intake(r.Context(), monitor.Request{
 		MediaType: req.MediaType, IMDbID: req.IMDbID, TMDbID: req.TMDbID, TVDbID: req.TVDbID,
-		Title: req.Title, Year: req.Year, Qualities: req.qualities(),
+		Title: req.Title, Year: req.Year, Qualities: qualities,
 		IsAnime: req.IsAnime, RequestRef: req.RequestRef,
 	}); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -765,6 +799,35 @@ func writeProbeMetrics(w http.ResponseWriter, p *prober) {
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+// writeCodedError writes the same structured `{error, message}` body writeAddError
+// uses, so every machine-readable failure on the intake paths has one shape.
+func writeCodedError(w http.ResponseWriter, status int, code, message string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]any{"error": code, "message": message})
+}
+
+// errCodeQualityNotAllowed is returned when a request names no quality tier the
+// configured policy permits — in practice a 2160p-only request while
+// WISP_ALLOW_2160P is off.
+//
+// It is deliberately a 4xx with no Retry-After, unlike every code writeAddError
+// emits: those describe upstream conditions (no streams yet, rate limiting, an
+// AIOStreams fault) that a feeder should keep polling through, and they are 5xx
+// or 429 for exactly that reason. This one is a permanent, local, policy
+// rejection — retrying it will never succeed — so a caller following the ordinary
+// "4xx = give up, 5xx/429 = retry" rule marks the request failed and closes it.
+const errCodeQualityNotAllowed = "quality_not_allowed"
+
+// writeQualityPolicyError rejects an intake whose every tier is disallowed.
+func writeQualityPolicyError(w http.ResponseWriter, log *slog.Logger, mediaType, id string, requested []string, policy library.QualityPolicy) {
+	msg := "no requested quality tier is allowed: 2160p is disabled (set WISP_ALLOW_2160P=true to enable 4K)"
+	log.Warn("intake rejected by quality policy", "code", errCodeQualityNotAllowed,
+		"media_type", mediaType, "id", id, "requested", requested,
+		"min_quality", policy.Min, "allow_2160p", policy.Allow2160p)
+	writeCodedError(w, http.StatusUnprocessableEntity, errCodeQualityNotAllowed, msg)
 }
 
 // Classified resolve outcomes. These map to distinct API responses in

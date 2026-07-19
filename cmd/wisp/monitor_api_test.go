@@ -28,6 +28,7 @@ func testApp(t *testing.T) *app {
 		store: st, log: log, startedAt: time.Now(),
 		meta:    metadata.New("", nil),
 		webhook: notify.New(notify.Options{}, log),
+		quality: allowAllQualities,
 	}
 	a.mon = monitor.New(st, a.meta, a, time.Hour, 4, 7*24*time.Hour, log) // Run not started → Intake only records
 	return a

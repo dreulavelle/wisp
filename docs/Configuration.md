@@ -11,6 +11,8 @@ All configuration is via environment variables.
 | `WISP_API_TOKEN` | — | **Optional API authentication.** If set, wisp requires `Authorization: Bearer <token>` on the control-plane endpoints. **Unset — the default — means the API is open to anyone who can reach the port.** See [API authentication](#api-authentication). |
 | `WISP_MOUNT_PATH` | — | If set, wisp self-mounts the library here (needs `/dev/fuse` + `SYS_ADMIN`). Unset = serve HTTP only and mount it yourself. |
 | `WISP_NOTIFY_MOUNT_PATH` | — | Absolute library root as seen by notification targets. Falls back to `WISP_MOUNT_PATH`, then to `/mnt/wisp`. Setting it explicitly is preferred: relying on the `/mnt/wisp` default is deprecated (wisp warns at startup) and will become required in a future major version. |
+| `WISP_MIN_QUALITY` | `1080p` | Lowest resolution tier wisp will request. A request naming a lower tier is **raised** to this one rather than rejected — the caller gets a better file instead of a failure. Accepts `480p`, `720p`, `1080p`, `2160p` (`4k`/`uhd` are canonicalized); unrecognized input falls back to `1080p`. This is a floor on *requested* tiers only: a request that names no tier still means "best available" and stays unconstrained. |
+| `WISP_ALLOW_2160P` | `false` | **4K is off by default.** While disabled, `2160p` is stripped from every request at intake, so it is never requested, never scraped, and never surfaced. A request naming **only** `2160p` is rejected outright with `422 quality_not_allowed` — see [4K opt-in](#4k-opt-in). Set to `true` to enable 4K. |
 | `WISP_SCHEDULE_INTERVAL` | `2h` | Fallback ceiling for the monitor loop. The scheduler otherwise wakes near a monitored item's next known airstamp/release — it doesn't poll on a fixed tick. |
 | `WISP_RESOLVE_CONCURRENCY` | `4` | How many episodes of a series resolve in parallel per scheduler pass. Titles are still processed one at a time, so this is the peak resolver fan-out against your debrid provider — raise it to drain long seasons faster, lower it if you hit rate limits. Clamped to `1`–`16`. |
 | `WISP_TIER_BACKOFF_MAX` | `168h` (7d) | Cap on the retry backoff for a requested quality tier that consistently returns "results exist, but not at this resolution" — e.g. a `2160p` request for a show with no 4K rips. Such a tier is retried on an exponential schedule from `WISP_SCHEDULE_INTERVAL` (interval, 2×, 4×, …), never more often than once per this duration once it saturates. wisp never permanently gives up, so a late release is still picked up; a successful pin of the tier resets it to the fast cadence. |
@@ -54,6 +56,45 @@ required and no password, wisp logs a startup warning and every add returns
 Because wisp goes through your AIOStreams instance, **all of your AIOStreams
 config applies automatically** — provider order, quality/HDR/dub preferences,
 debrid vs usenet, filtering. wisp adds no ranking or filtering of its own.
+
+
+## 4K opt-in
+
+`WISP_ALLOW_2160P` defaults to `false`, so a stock wisp never fetches 4K. The
+policy is applied at **intake**, not to search results, so unsatisfiable work is
+never created in the first place:
+
+| Requested | With the defaults | Result |
+|-----------|-------------------|--------|
+| `["1080p", "2160p"]` | `2160p` dropped | Monitor created for `1080p` |
+| `["720p"]` | raised to the minimum | Monitor created for `1080p` |
+| `[]` (best available) | untouched | Monitor created unconstrained |
+| `["2160p"]` | nothing left to request | **Rejected**, `422 quality_not_allowed` |
+
+A 4K-only request is refused rather than turned into a monitor that can never be
+satisfied. The response is a `4xx` with no `Retry-After` and the machine-readable
+code `quality_not_allowed`, so a request router (Silo) can mark the request
+permanently failed and close it instead of polling for ever. Every intake path
+enforces this: `POST /api/add` (both the request-shaped and the legacy direct-pin
+bodies) and `POST /api/monitors`.
+
+### Existing monitors
+
+Filtering at intake alone is not enough — a `2160p` already stored on a monitor
+would keep being scraped on every scheduler pass, and would be re-added whenever
+the title was re-requested. So wisp **migrates the store at startup**:
+
+- A monitor with a mix of tiers has the disallowed ones stripped, along with
+  their backoff and pending-work bookkeeping.
+- A monitor left with **no** allowed tier (a 4K-only request) is marked failed
+  with an explanatory error, and reports `failed` on
+  `GET /api/requests/status` — the same outcome a fresh request would get,
+  rather than being silently downgraded to "best available".
+- Monitors that request nothing, are already completed, or are already compliant
+  are left untouched.
+
+The migration is one-way: re-enabling `WISP_ALLOW_2160P` later does not restore
+`2160p` to existing monitors. Re-request those titles to pick the tier back up.
 
 ## API authentication
 
