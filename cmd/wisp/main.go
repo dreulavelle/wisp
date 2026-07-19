@@ -207,7 +207,7 @@ func portOf(addr string) string {
 	return ":8080"
 }
 
-const version = "1.3.2" // x-release-please-version
+const version = "1.4.0" // x-release-please-version
 
 type app struct {
 	store     *store.Store

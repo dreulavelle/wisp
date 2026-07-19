@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.4.0](https://github.com/dreulavelle/wisp/compare/v1.3.2...v1.4.0) (2026-07-19)
+
+
+### Features
+
+* remove lazy resolution (placeholder pins) ([#35](https://github.com/dreulavelle/wisp/issues/35)) ([309d378](https://github.com/dreulavelle/wisp/commit/309d378030edae485bfefe44249552361b34cc39))
+* remove the /api/ws WebSocket endpoint ([#37](https://github.com/dreulavelle/wisp/issues/37)) ([79308f3](https://github.com/dreulavelle/wisp/commit/79308f389f3fba509fae8d1193b66c865f2f9728))
+
+
+### Performance
+
+* **ci:** cross-compile arm64 instead of emulating it ([#34](https://github.com/dreulavelle/wisp/issues/34)) ([d29468f](https://github.com/dreulavelle/wisp/commit/d29468fabb07e628358821b19d27e6f80f111c23))
+
 ## [1.3.2](https://github.com/dreulavelle/wisp/compare/v1.3.1...v1.3.2) (2026-07-19)
 
 
