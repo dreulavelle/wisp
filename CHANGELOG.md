@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.5.0](https://github.com/dreulavelle/wisp/compare/v1.4.0...v1.5.0) (2026-07-19)
+
+
+### Features
+
+* instrument media-server notification delivery ([#39](https://github.com/dreulavelle/wisp/issues/39)) ([155745b](https://github.com/dreulavelle/wisp/commit/155745b9c920bd95cc7a285a2a0e0b41d004b82f))
+* optional bearer-token authentication for the API ([#38](https://github.com/dreulavelle/wisp/issues/38)) ([dc99eb7](https://github.com/dreulavelle/wisp/commit/dc99eb787fce1dc2c82b97e210fca06c7ec04618))
+
 ## [1.4.0](https://github.com/dreulavelle/wisp/compare/v1.3.2...v1.4.0) (2026-07-19)
 
 
