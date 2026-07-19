@@ -75,6 +75,18 @@ type Config struct {
 	// TMDBMarkets is the ordered list of ISO-3166-1 regions whose digital/
 	// physical release dates gate movies (any market releasing makes it eligible).
 	TMDBMarkets []string
+
+	// ProbeConcurrency is the global cap on in-flight probe HTTP requests across
+	// ALL episodes — the debrid/resolver safety valve for transport probing.
+	// Clamped to [1, 32].
+	ProbeConcurrency int
+	// ProbeWindow bounds how many candidate streams of ONE unit are probed
+	// concurrently (rank-preserving sliding window). Clamped to [1, 8].
+	ProbeWindow int
+	// ProbeTimeout is the per-request network timeout for a single probe. It
+	// starts only after the probe acquires a concurrency permit, so queue wait
+	// never eats the network budget. Clamped to [2s, 30s].
+	ProbeTimeout time.Duration
 }
 
 // SelfMount reports whether wisp should mount the library itself.
@@ -105,6 +117,9 @@ func Load() (*Config, error) {
 		TierBackoffMax:       durationEnv("WISP_TIER_BACKOFF_MAX", 7*24*time.Hour),
 		TMDBAPIKey:           strings.TrimSpace(os.Getenv("WISP_TMDB_API_KEY")),
 		TMDBMarkets:          listEnv("WISP_TMDB_MARKETS", []string{"US", "CA", "GB", "AU", "DE", "FR", "IT", "ES", "JP", "IN"}),
+		ProbeConcurrency:     clampInt(intEnv("WISP_PROBE_CONCURRENCY", 8), 1, 32),
+		ProbeWindow:          clampInt(intEnv("WISP_PROBE_WINDOW", 3), 1, 8),
+		ProbeTimeout:         clampDuration(durationEnv("WISP_PROBE_TIMEOUT", 10*time.Second), 2*time.Second, 30*time.Second),
 	}
 	if c.AIOStreamsURL == "" {
 		return nil, fmt.Errorf("WISP_AIOSTREAMS_URL is required")
@@ -148,6 +163,17 @@ func clampInt(n, lo, hi int) int {
 		return hi
 	}
 	return n
+}
+
+// clampDuration bounds d to the inclusive range [lo, hi].
+func clampDuration(d, lo, hi time.Duration) time.Duration {
+	if d < lo {
+		return lo
+	}
+	if d > hi {
+		return hi
+	}
+	return d
 }
 
 // listEnv parses a comma-separated list, upper-casing and trimming each entry

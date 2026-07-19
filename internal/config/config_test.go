@@ -79,6 +79,54 @@ func TestClampInt(t *testing.T) {
 	}
 }
 
+func TestClampDuration(t *testing.T) {
+	lo, hi := 2*time.Second, 30*time.Second
+	cases := []struct {
+		d, want time.Duration
+	}{
+		{10 * time.Second, 10 * time.Second}, // in range
+		{time.Second, lo},                    // below floor
+		{time.Minute, hi},                    // above ceiling
+		{lo, lo},                             // at floor
+		{hi, hi},                             // at ceiling
+	}
+	for _, c := range cases {
+		if got := clampDuration(c.d, lo, hi); got != c.want {
+			t.Fatalf("clampDuration(%v) = %v, want %v", c.d, got, c.want)
+		}
+	}
+}
+
+// The probe knobs load with the documented defaults and clamp out-of-range env.
+func TestLoadProbeDefaultsAndClamps(t *testing.T) {
+	t.Setenv("WISP_AIOSTREAMS_URL", "https://host/stremio/uuid/blob/manifest.json")
+
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.ProbeConcurrency != 8 || c.ProbeWindow != 3 || c.ProbeTimeout != 10*time.Second {
+		t.Fatalf("defaults = (%d, %d, %v), want (8, 3, 10s)", c.ProbeConcurrency, c.ProbeWindow, c.ProbeTimeout)
+	}
+
+	t.Setenv("WISP_PROBE_CONCURRENCY", "999")
+	t.Setenv("WISP_PROBE_WINDOW", "0")
+	t.Setenv("WISP_PROBE_TIMEOUT", "500ms")
+	c, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.ProbeConcurrency != 32 {
+		t.Fatalf("ProbeConcurrency = %d, want 32 (clamped)", c.ProbeConcurrency)
+	}
+	if c.ProbeWindow != 1 {
+		t.Fatalf("ProbeWindow = %d, want 1 (clamped)", c.ProbeWindow)
+	}
+	if c.ProbeTimeout != 2*time.Second {
+		t.Fatalf("ProbeTimeout = %v, want 2s (clamped)", c.ProbeTimeout)
+	}
+}
+
 func TestListEnv(t *testing.T) {
 	t.Setenv("WISP_TEST_LIST", " us , gb ,, jp ")
 	got := listEnv("WISP_TEST_LIST", []string{"X"})
