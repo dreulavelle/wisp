@@ -222,6 +222,52 @@ func TestPersistResultRespectsConcurrentIntake(t *testing.T) {
 	}
 }
 
+// A forced refresh must process an item whose persisted DueAt is in the future
+// (e.g. sitting in retry backoff), then let normal cadence resume — the override
+// is one-shot and must not linger.
+func TestForceRefreshOverridesFutureDueThenResumes(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/movie/500/release_dates", func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte(`{"results":[{"iso_3166_1":"US","release_dates":[{"type":4,"release_date":"2026-01-01T00:00:00Z"}]}]}`))
+	})
+	ful := newFakeFul()
+	ful.noStream[[2]int{0, 0}] = true // released, but no stream yet → stays in retry backoff
+	now := date("2026-06-01T00:00:00Z")
+	m, st := testMonitor(t, mux, ful, now) // interval = 1h
+
+	// A monitored, released movie parked with a far-future DueAt (retry backoff).
+	if err := st.PutMonitored(context.Background(), store.Monitored{
+		Key: "movie:tt5", MediaType: "movie", IMDbID: "tt5", TMDbID: "500", Title: "Film",
+		Category: library.Root("movie", false), DueAt: now.Add(2 * time.Hour), Enabled: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Not due yet → an ordinary pass skips it.
+	m.checkDue(context.Background())
+	if ful.calls != 0 {
+		t.Fatalf("future-DueAt item must be skipped without force; calls=%d", ful.calls)
+	}
+
+	// A forced refresh treats every enabled item as due now → it's processed.
+	m.ForceRefresh()
+	m.checkDue(context.Background())
+	if ful.calls != 1 {
+		t.Fatalf("forced refresh must process the future-DueAt item; calls=%d", ful.calls)
+	}
+
+	// The override is one-shot: processing reset DueAt to the retry ceiling
+	// (now+interval), NOT zeroed, and the next ordinary pass honors it again.
+	got, _ := st.GetMonitored(context.Background(), "movie:tt5")
+	if got == nil || !got.DueAt.Equal(now.Add(time.Hour)) {
+		t.Fatalf("forced pass should reset DueAt to the retry ceiling now+1h; got %#v", got)
+	}
+	m.checkDue(context.Background())
+	if ful.calls != 1 {
+		t.Fatalf("override must not persist; item re-processed after force: calls=%d", ful.calls)
+	}
+}
+
 func TestMonitorRejectsUngatableMovie(t *testing.T) {
 	st := newStore(t)
 	m := New(st, metadata.New("", nil), newFakeFul(), time.Hour, slog.New(slog.DiscardHandler)) // no TMDB key

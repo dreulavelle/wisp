@@ -3,6 +3,7 @@ package metadata
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -22,7 +23,7 @@ func testService(t *testing.T, mux *http.ServeMux) *Service {
 	t.Helper()
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
-	s := New("v3key", []string{"US"})
+	s := New("v3key", []string{"US"}, WithLogger(slog.New(slog.DiscardHandler)))
 	s.cinemetaBase, s.tmdbBase, s.tvmazeBase = srv.URL, srv.URL, srv.URL
 	return s
 }
@@ -162,6 +163,39 @@ func TestMovieReleaseDate(t *testing.T) {
 	// No tmdb id → Cinemeta fallback.
 	if got, err := s.MovieReleaseDate(context.Background(), "tt9", "", now); err != nil || !got.Equal(date("2020-02-02T00:00:00Z")) {
 		t.Fatalf("cinemeta fallback = %v, %v", got, err)
+	}
+}
+
+// A TMDB call failure (bad/expired key → 401) must fall back to Cinemeta rather
+// than erroring, so one bad key doesn't block every movie. A bad key behaves no
+// worse than no key configured.
+func TestMovieReleaseDateFallsBackToCinemetaOnTMDBFailure(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/movie/500/release_dates", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized) // invalid TMDB key
+	})
+	mux.HandleFunc("/meta/movie/tt5.json", func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte(`{"meta":{"released":"2020-02-02T00:00:00Z"}}`))
+	})
+	s := testService(t, mux)
+	now := date("2026-06-01T00:00:00Z")
+
+	got, err := s.MovieReleaseDate(context.Background(), "tt5", "500", now)
+	if err != nil || !got.Equal(date("2020-02-02T00:00:00Z")) {
+		t.Fatalf("401 fallback = %v, %v; want Cinemeta date 2020-02-02", got, err)
+	}
+}
+
+// A TMDB call failure with no imdb id has no Cinemeta fallback, so it must
+// surface the error (the monitor then retries) rather than masking it.
+func TestMovieReleaseDateTMDBFailureNoImdbErrors(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/movie/500/release_dates", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+	})
+	s := testService(t, mux)
+	if _, err := s.MovieReleaseDate(context.Background(), "", "500", date("2026-06-01T00:00:00Z")); err == nil {
+		t.Fatal("expected an error when TMDB fails and no imdb fallback exists")
 	}
 }
 

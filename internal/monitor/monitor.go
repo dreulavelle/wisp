@@ -88,6 +88,11 @@ type Monitor struct {
 	// armed, published so the schedule API reports the scheduler's real next wake
 	// rather than a reconstruction. Zero until the first pass arms a timer.
 	nextWakeNano atomic.Int64
+	// forceAll, when set, makes the next scheduler pass treat every enabled item
+	// as due regardless of its persisted DueAt. It is a one-shot override consumed
+	// (swapped back to false) at the start of that pass, so backoff/next-due times
+	// resume normally afterward. Set by ForceRefresh (POST /api/monitors/refresh).
+	forceAll atomic.Bool
 	// mu serializes read-modify-write of a monitored item so the scheduler and a
 	// concurrent Intake/delete can't clobber each other (network processing runs
 	// outside the lock).
@@ -282,12 +287,25 @@ func (m *Monitor) Run(ctx context.Context) {
 	}
 }
 
-// Wake nudges the scheduler to run a pass now (e.g. after Intake).
+// Wake nudges the scheduler to run a pass now (e.g. after Intake). It still
+// honors each item's persisted DueAt — use it for "something changed, look now".
 func (m *Monitor) Wake() {
 	select {
 	case m.wake <- struct{}{}:
 	default:
 	}
+}
+
+// ForceRefresh makes the very next scheduler pass consider every enabled monitor
+// due now — running its normal processing (release gate → resolve → pin)
+// regardless of persisted DueAt/backoff — then resume normal cadence. It's the
+// "operator fixed config, retry everything now" path behind
+// POST /api/monitors/refresh, distinct from Wake (which honors DueAt). The
+// override is one-shot: it applies to a single pass and does not zero any
+// item's stored DueAt.
+func (m *Monitor) ForceRefresh() {
+	m.forceAll.Store(true)
+	m.Wake()
 }
 
 // passResult is the outcome of one scheduler pass over a monitored item, folded
@@ -309,13 +327,18 @@ func (m *Monitor) checkDue(ctx context.Context) time.Time {
 		m.log.Error("list monitored", "error", err)
 		return time.Time{}
 	}
+	// One-shot: a forced refresh treats every enabled item as due for THIS pass
+	// only. Consumed here (not before the list, so a transient list error keeps
+	// the request pending), and never written to any item's DueAt — normal cadence
+	// resumes on the next pass.
+	force := m.forceAll.Swap(false)
 	now := m.now()
 	var earliest time.Time
 	for _, it := range items {
 		if !it.Enabled || it.Completed || it.Failed {
 			continue // paused, a fully-pinned movie kept for history, or given up
 		}
-		if it.DueAt.After(now) {
+		if !force && it.DueAt.After(now) {
 			if earliest.IsZero() || it.DueAt.Before(earliest) {
 				earliest = it.DueAt
 			}
