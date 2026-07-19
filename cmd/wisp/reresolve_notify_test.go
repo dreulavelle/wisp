@@ -25,40 +25,9 @@ func reResolveNotifyApp(t *testing.T, imports chan [2]string) *app {
 
 const reResolveNotifyPath = "movies/Inception (2010) [tmdb-27205]/Inception (2010) - [1080p].mkv"
 
-// The ARR webhook — not the WebSocket event — is what the deployed media server
-// listens on, so an on-demand placeholder resolve must re-announce the path.
-// Without it the catalog keeps the 1-byte placeholder size indefinitely.
-func TestReResolvePlaceholderFiresImportWebhook(t *testing.T) {
-	imports := make(chan [2]string, 4)
-	a := reResolveNotifyApp(t, imports)
-
-	p := store.Pin{
-		MediaType: "movie", IMDbID: "tt1375666", TMDbID: "27205",
-		Title: "Inception", Year: 2010, Quality: "1080p",
-		VirtualPath: reResolveNotifyPath, Size: 1, ResolvedAt: time.Now(),
-	}
-	if err := a.store.Upsert(context.Background(), p); err != nil {
-		t.Fatal(err)
-	}
-	if err := a.reResolve(context.Background(), &p); err != nil {
-		t.Fatalf("reResolve: %v", err)
-	}
-	if p.SourceURL == "" || p.Size <= 1 {
-		t.Fatalf("resolved pin = %#v, want a real SourceURL and size", p)
-	}
-
-	select {
-	case got := <-imports:
-		if got[0] != "movie" || got[1] != reResolveNotifyPath {
-			t.Fatalf("import webhook = %q %q, want %q %q", got[0], got[1], "movie", reResolveNotifyPath)
-		}
-	default:
-		t.Fatal("placeholder resolution did not fire an import webhook")
-	}
-}
-
-// A self-heal keeps the same path and size, so re-announcing it would only make
-// a flaky upstream storm the media server with rescans mid-playback.
+// reResolve only ever self-heals a dead link, keeping the same path and size, so
+// re-announcing it would only make a flaky upstream storm the media server with
+// rescans mid-playback.
 func TestReResolveSelfHealDoesNotFireWebhook(t *testing.T) {
 	imports := make(chan [2]string, 4)
 	a := reResolveNotifyApp(t, imports)
@@ -83,7 +52,7 @@ func TestReResolveSelfHealDoesNotFireWebhook(t *testing.T) {
 	}
 }
 
-// A failed resolve leaves the store untouched, so nothing may be announced.
+// A failed self-heal leaves the store untouched, so nothing may be announced.
 func TestReResolveFailureDoesNotFireWebhook(t *testing.T) {
 	imports := make(chan [2]string, 4)
 	a := reResolveNotifyApp(t, imports)
@@ -93,7 +62,8 @@ func TestReResolveFailureDoesNotFireWebhook(t *testing.T) {
 	p := store.Pin{
 		MediaType: "movie", IMDbID: "tt1375666", TMDbID: "27205",
 		Title: "Inception", Year: 2010, Quality: "1080p",
-		VirtualPath: reResolveNotifyPath, Size: 1, ResolvedAt: time.Now(),
+		VirtualPath: reResolveNotifyPath, SourceURL: "http://dead.invalid/stream",
+		Size: 123, ResolvedAt: time.Now(),
 	}
 	if err := a.store.Upsert(context.Background(), p); err != nil {
 		t.Fatal(err)

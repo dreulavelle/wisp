@@ -26,7 +26,7 @@ Resolve a title via AIOStreams, pin the top stream, and create its virtual file.
 
 **Responses**
 
-- `202` → `{"monitoring":true,"state":"queued"}` for request-shaped intake (`qualities`, `request_ref`, or `is_anime` present). Wisp schedules release-aware placeholder creation immediately; each placeholder pin has size 1 and resolves through AIOStreams on first playback.
+- `202` → `{"monitoring":true,"state":"queued"}` for request-shaped intake (`qualities`, `request_ref`, or `is_anime` present). Wisp records the monitor immediately and resolves each unit through AIOStreams on the next scheduler pass, once it is past its release/air date.
 
 - `200` → `{"virtual_path": "...", "size": 1471496964}` — pinned.
 - `4xx/5xx` → `{"error": "<code>", "message": "..."}` — a structured code so a
@@ -141,15 +141,11 @@ Only **servable** pins count — a pin whose stream has gone is neither
 ## `GET /api/ws`
 
 WebSocket endpoint (`ws://<host>:8080/api/ws`) that pushes an event whenever a
-pin becomes playable. It exists for the [lazy-resolution](Configuration.md#lazy-resolution)
-flow: a 1-byte placeholder is cataloged instantly, and this event is how a
-media-server plugin learns to rescan and promote that entry to its real size.
+pin becomes playable, so a media-server plugin can rescan the moment a file
+appears instead of waiting for its next full poll.
 
-wisp broadcasts `pin_completed` when:
-
-- a pin resolves eagerly (`POST /api/add` or a scheduler pass),
-- a placeholder pin is created, and
-- a placeholder resolves on first playback.
+wisp broadcasts `pin_completed` when a pin resolves — via `POST /api/add` or a
+scheduler pass.
 
 A [self-heal](Architecture.md#the-self-heal-model) re-resolve does **not** emit an
 event — the virtual path the media server already holds is unchanged.

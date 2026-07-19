@@ -182,3 +182,48 @@ func TestDeleteByMediaNormalizesStoredLabel(t *testing.T) {
 		t.Fatalf("delete = %v (err %v), want the 4K pin matched by 2160p", deleted, err)
 	}
 }
+
+// Databases written by the removed lazy-resolution feature still hold 1-byte
+// placeholder pins with no SourceURL. Nothing can resolve them any more, so
+// startup sweeps them and leaves every real pin untouched.
+func TestDeleteUnresolved(t *testing.T) {
+	st := open(t)
+	ctx := context.Background()
+
+	real1 := Pin{
+		MediaType: "movie", IMDbID: "tt1", Title: "Real", Year: 2010, Quality: "1080p",
+		VirtualPath: "movies/Real/Real.mkv", SourceURL: "http://a", Size: 100, ResolvedAt: time.Unix(1000, 0),
+	}
+	placeholder := Pin{
+		MediaType: "movie", IMDbID: "tt2", Title: "Ghost", Year: 2011, Quality: "1080p",
+		VirtualPath: "movies/Ghost/Ghost.mkv", SourceURL: "", Size: 1, ResolvedAt: time.Unix(1000, 0),
+	}
+	for _, p := range []Pin{real1, placeholder} {
+		if err := st.Upsert(ctx, p); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	deleted, err := st.DeleteUnresolved(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(deleted) != 1 || deleted[0] != placeholder.VirtualPath {
+		t.Fatalf("deleted = %v, want [%q]", deleted, placeholder.VirtualPath)
+	}
+	if got, _ := st.ByPath(ctx, placeholder.VirtualPath); got != nil {
+		t.Fatalf("placeholder survived: %#v", got)
+	}
+	if got, _ := st.ByPath(ctx, real1.VirtualPath); got == nil {
+		t.Fatal("resolved pin was swept")
+	}
+
+	// Idempotent: a clean database has nothing left to remove.
+	deleted, err = st.DeleteUnresolved(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(deleted) != 0 {
+		t.Fatalf("second sweep deleted %v, want nothing", deleted)
+	}
+}

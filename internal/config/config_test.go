@@ -233,3 +233,36 @@ func TestLoadNotifyDebounce(t *testing.T) {
 		}
 	}
 }
+
+// Lazy resolution was removed, but WISP_LAZY_RESOLUTION stays accepted so a
+// deployment that sets it still starts. Load only records that it was asked
+// for, so main can warn that it does nothing.
+func TestLoadAcceptsRemovedLazyResolution(t *testing.T) {
+	t.Setenv("WISP_AIOSTREAMS_URL", "https://host/stremio/uuid/blob/manifest.json")
+
+	for _, tc := range []struct {
+		name string
+		set  bool
+		val  string
+		want bool
+	}{
+		{name: "unset", want: false},
+		{name: "false", set: true, val: "false", want: false},
+		{name: "garbage", set: true, val: "banana", want: false},
+		{name: "true", set: true, val: "true", want: true},
+		{name: "1", set: true, val: "1", want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.set {
+				t.Setenv("WISP_LAZY_RESOLUTION", tc.val)
+			}
+			c, err := Load()
+			if err != nil {
+				t.Fatalf("WISP_LAZY_RESOLUTION=%q must not fail startup: %v", tc.val, err)
+			}
+			if c.LazyResolutionRequested != tc.want {
+				t.Fatalf("LazyResolutionRequested = %v, want %v", c.LazyResolutionRequested, tc.want)
+			}
+		})
+	}
+}

@@ -103,10 +103,11 @@ type Config struct {
 	// never eats the network budget. Clamped to [2s, 30s].
 	ProbeTimeout time.Duration
 
-	// LazyResolution, when enabled, creates placeholder pins with size 1 and an empty URL
-	// immediately when a title is monitored, allowing immediate media-server cataloging
-	// with stream resolution happening on-demand upon first playback request.
-	LazyResolution bool
+	// LazyResolutionRequested reports that WISP_LAZY_RESOLUTION was set to a true
+	// value. The feature it enabled has been removed and the variable is ignored;
+	// it is still parsed so existing deployments that set it keep starting. Load
+	// has no logger, so the caller owns the deprecation warning.
+	LazyResolutionRequested bool
 }
 
 // SelfMount reports whether wisp should mount the library itself.
@@ -142,7 +143,8 @@ func Load() (*Config, error) {
 		ProbeConcurrency:     clampInt(intEnv("WISP_PROBE_CONCURRENCY", 8), 1, 32),
 		ProbeWindow:          clampInt(intEnv("WISP_PROBE_WINDOW", 3), 1, 8),
 		ProbeTimeout:         clampDuration(durationEnv("WISP_PROBE_TIMEOUT", 10*time.Second), 2*time.Second, 30*time.Second),
-		LazyResolution:       boolEnv("WISP_LAZY_RESOLUTION", false),
+		// Removed feature, still accepted so setting it is not a startup failure.
+		LazyResolutionRequested: boolEnv("WISP_LAZY_RESOLUTION", false),
 	}
 	if c.AIOStreamsURL == "" {
 		return nil, fmt.Errorf("WISP_AIOSTREAMS_URL is required")
