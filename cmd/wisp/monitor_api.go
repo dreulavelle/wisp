@@ -127,9 +127,13 @@ func (a *app) handleDeleteMonitor(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"deleted": key})
 }
 
-// handleRefreshMonitors triggers an immediate scheduler pass — POST /api/monitors/refresh.
+// handleRefreshMonitors forces an immediate full re-check — POST /api/monitors/refresh.
+// Unlike a plain wake, this treats every enabled monitor as due now, so titles
+// sitting in retry backoff (e.g. after a transient failure) are re-evaluated at
+// once — the "operator fixed config, retry everything" path — before normal
+// cadence resumes.
 func (a *app) handleRefreshMonitors(w http.ResponseWriter, r *http.Request) {
-	a.mon.Wake()
+	a.mon.ForceRefresh()
 	writeJSON(w, map[string]any{"refreshing": true})
 }
 
