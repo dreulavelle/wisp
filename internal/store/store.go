@@ -242,6 +242,49 @@ func (s *Store) Count(_ context.Context) (int, error) {
 	return n, err
 }
 
+// DeleteUnresolved removes every pin that has no SourceURL, returning the
+// deleted virtual paths.
+//
+// These are the 1-byte placeholder pins written by the removed lazy-resolution
+// feature. Nothing creates them any more, and without the code that resolved
+// them on read they would sit in the library forever as unplayable entries the
+// scheduler considers already pinned. Dropping them lets the monitor — which
+// still holds the title — re-pin eagerly on its next pass.
+//
+// Idempotent: a database that never ran lazy resolution has nothing to delete.
+func (s *Store) DeleteUnresolved(_ context.Context) ([]string, error) {
+	var deleted []string
+	err := s.db.Update(func(tx *bbolt.Tx) error {
+		b := tx.Bucket(pinsBucket)
+		// Collect during iteration, delete after: mutating a bbolt bucket inside
+		// its own ForEach can make the cursor skip or repeat keys.
+		var keys [][]byte
+		if err := b.ForEach(func(k, v []byte) error {
+			var p Pin
+			if err := json.Unmarshal(v, &p); err != nil {
+				return err
+			}
+			if p.SourceURL == "" {
+				keys = append(keys, append([]byte(nil), k...))
+				deleted = append(deleted, p.VirtualPath)
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
+		for _, k := range keys {
+			if err := b.Delete(k); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return deleted, nil
+}
+
 // Delete removes the pin at a virtual path, reporting whether it existed.
 func (s *Store) Delete(_ context.Context, virtualPath string) (bool, error) {
 	existed := false

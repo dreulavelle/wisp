@@ -53,6 +53,16 @@ func main() {
 		log.Info("category backfill", "records_updated", n)
 	}
 
+	// One-shot cleanup for databases written by the removed lazy-resolution
+	// feature: its 1-byte placeholder pins are unplayable now that nothing
+	// resolves them on read. Dropping them lets the monitor re-pin eagerly.
+	if paths, err := st.DeleteUnresolved(context.Background()); err != nil {
+		log.Warn("placeholder cleanup", "error", err)
+	} else if len(paths) > 0 {
+		log.Warn("removed unresolved placeholder pins left by WISP_LAZY_RESOLUTION; monitored titles will be re-pinned eagerly on the next scheduler pass",
+			"pins_removed", len(paths))
+	}
+
 	notifier := notify.New(notify.Options{
 		ArrWebhookURL:  cfg.NotifyArrWebhookURL,
 		SiloWebhookURL: cfg.SiloWebhookURL,
@@ -68,6 +78,9 @@ func main() {
 		log.Warn("DEPRECATED: notification targets are configured but neither WISP_NOTIFY_MOUNT_PATH nor WISP_MOUNT_PATH is set; falling back to the built-in default library root. Set WISP_NOTIFY_MOUNT_PATH to the path your media server sees — relying on the default is deprecated and will become an error in a future major version",
 			"default_mount_path", notifier.MountPath())
 	}
+	if cfg.LazyResolutionRequested {
+		log.Warn("REMOVED: WISP_LAZY_RESOLUTION is set but lazy resolution has been removed and the setting has no effect; every monitored title is now resolved eagerly. The variable is still accepted so existing deployments keep starting, and will be deleted in a future major version — remove it from your configuration")
+	}
 
 	aio := aiostreams.New(cfg.AIOStreamsURL, cfg.AIOStreamsPassword)
 	if !aio.HasCredentials() {
@@ -82,8 +95,7 @@ func main() {
 			Window:      cfg.ProbeWindow,
 			Timeout:     cfg.ProbeTimeout,
 		}, log),
-		startedAt:      time.Now(),
-		lazyResolution: cfg.LazyResolution,
+		startedAt: time.Now(),
 	}
 	log.Info("probe limits", "concurrency", cfg.ProbeConcurrency, "window", cfg.ProbeWindow, "timeout", cfg.ProbeTimeout)
 	app.mon = monitor.New(st, app.meta, app, cfg.ScheduleInterval, cfg.ResolveConcurrency, cfg.TierBackoffMax, log)
@@ -214,10 +226,9 @@ type app struct {
 	// pinMu serializes the store-mutation half of pin() (list → upsert → delete
 	// of superseded pins) so concurrent pins — API and scheduler — can't clobber
 	// each other. The network resolve runs outside it.
-	pinMu          sync.Mutex
-	wsClientsMu    sync.Mutex
-	wsClients      map[*websocket.Conn]chan []byte
-	lazyResolution bool
+	pinMu       sync.Mutex
+	wsClientsMu sync.Mutex
+	wsClients   map[*websocket.Conn]chan []byte
 	// wsReadTimeoutOverride shortens the WebSocket idle eviction window; zero
 	// means defaultWSReadTimeout. Only tests set it.
 	wsReadTimeoutOverride time.Duration
@@ -693,15 +704,16 @@ var (
 // file named [2160p]; if that tier has vanished it falls back to the best
 // available so playback still survives.
 //
-// It serves two callers, told apart by whether the pin already has a SourceURL:
-// the dead-link self-heal, and the first playback of a lazy-resolution
-// placeholder. Only the former bypasses the AIOStreams search cache — a
-// placeholder has never resolved, so it has no stale result to bust, and a
-// cache-busting search there would just cost a full upstream round-trip on a
-// path a player is actively waiting on.
+// It has one caller: the dead-link self-heal in the file server. The search
+// always bypasses the AIOStreams cache — the pin's stored link is known bad, so
+// a cached result set is exactly what must not be reused.
+//
+// A self-heal deliberately notifies nothing. The virtual path and the entry the
+// media server already holds are unchanged, so a pin_completed broadcast or an
+// import webhook would be pure noise, and a flaky upstream can self-heal
+// repeatedly within a single playback.
 func (a *app) reResolve(ctx context.Context, p *store.Pin) error {
-	placeholder := p.SourceURL == ""
-	fresh := !placeholder
+	const fresh = true
 	sourceURL, size, _, _, err := a.resolve(ctx, p.MediaType, p.IMDbID, p.Season, p.Episode, library.NormalizeQuality(p.Quality), fresh)
 	if errors.Is(err, errNoQualityMatch) {
 		sourceURL, size, _, _, err = a.resolve(ctx, p.MediaType, p.IMDbID, p.Season, p.Episode, "", fresh)
@@ -710,38 +722,7 @@ func (a *app) reResolve(ctx context.Context, p *store.Pin) error {
 		return err
 	}
 	p.SourceURL, p.Size = sourceURL, size
-	if err := a.store.UpdateResolution(ctx, p.VirtualPath, sourceURL, size); err != nil {
-		return err
-	}
-	// A placeholder just became a real, full-size file. pin_completed is how the
-	// media-server plugin learns to rescan and promote the 1-byte catalog entry,
-	// so the on-demand resolve must emit it exactly like the eager pin does —
-	// otherwise the "resolve on first playback" half of lazy resolution completes
-	// silently and the catalog keeps the placeholder size.
-	//
-	// A self-heal deliberately does not broadcast: the virtual path the media
-	// server already holds is unchanged, so the event would be pure noise, and a
-	// flaky upstream can self-heal repeatedly within one playback.
-	if placeholder {
-		a.broadcastPinCompleted(p.MediaType, p.IMDbID, p.TMDbID, p.TVDbID, p.VirtualPath)
-		// The WebSocket event is the forward-looking channel; the ARR webhook is
-		// the one media servers actually consume today, and it is what the eager
-		// pin already uses. Without it an on-demand resolve leaves the catalog
-		// holding the 1-byte placeholder size indefinitely.
-		//
-		// Import, not Rename: the virtual path is unchanged, so there is nothing
-		// to rename. This re-announces the same path the placeholder was
-		// announced under when it was created, which is exactly the idempotent
-		// "scan this path" trigger an Autoscan-style consumer expects.
-		//
-		// The context is detached because reResolve is driven from an HTTP
-		// request whose context dies the moment the player hangs up — plausibly
-		// right after it triggers resolution. Delivery is best-effort and
-		// asynchronous inside the notifier, so a down media server cannot stall
-		// or fail playback.
-		a.webhook.Import(context.WithoutCancel(ctx), p.MediaType, p.VirtualPath)
-	}
-	return nil
+	return a.store.UpdateResolution(ctx, p.VirtualPath, sourceURL, size)
 }
 
 // resolve picks the highest-ranked stream whose resolver can serve media and

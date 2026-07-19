@@ -129,49 +129,8 @@ func TestWSBroadcastConcurrentClientsAgreeOnEveryFrame(t *testing.T) {
 	}
 }
 
-// The whole point of the placeholder is that the media-server plugin gets told
-// when it becomes real. Resolving one on first playback goes through reResolve,
-// which must broadcast pin_completed just like the eager pin does — otherwise
-// the catalog keeps the 1-byte size until an unrelated full poll.
-func TestReResolvePlaceholderBroadcastsPinCompleted(t *testing.T) {
-	backend := wispTestBackend(t)
-	defer backend.Close()
-
-	a := testApp(t)
-	a.aio = aiostreams.New(backend.URL+"/stremio/uuid/blob/manifest.json", "pw")
-	a.prober = testProber()
-	wsURL := wsTestServer(t, a)
-	conn := wsDial(t, a, wsURL, 1)
-
-	vpath := "movies/Inception (2010) [tmdb-27205]/Inception (2010) - [1080p].mkv"
-	placeholder := store.Pin{
-		MediaType: "movie", IMDbID: "tt1375666", TMDbID: "27205", TVDbID: "441314",
-		Title: "Inception", Year: 2010, Quality: "1080p", VirtualPath: vpath,
-		Size: 1, ResolvedAt: time.Now(),
-	}
-	if err := a.store.Upsert(context.Background(), placeholder); err != nil {
-		t.Fatal(err)
-	}
-
-	p := placeholder
-	if err := a.reResolve(context.Background(), &p); err != nil {
-		t.Fatalf("reResolve: %v", err)
-	}
-	if p.SourceURL == "" || p.Size <= 1 {
-		t.Fatalf("resolved pin = %#v, want a real SourceURL and size", p)
-	}
-
-	msg := wsRecv(t, conn)
-	if msg.VirtualPath != vpath {
-		t.Fatalf("broadcast path = %q, want %q", msg.VirtualPath, vpath)
-	}
-	if msg.MediaType != "movie" || msg.IMDbID != "tt1375666" || msg.TMDbID != "27205" || msg.TVDbID != "441314" {
-		t.Fatalf("broadcast carried the wrong identity: %#v", msg)
-	}
-}
-
-// A self-heal is not a placeholder transition: the path and the entry the media
-// server already holds are unchanged, so it must stay silent rather than
+// reResolve exists only to self-heal a dead link: the path and the entry the
+// media server already holds are unchanged, so it must stay silent rather than
 // triggering a rescan on every flaky-upstream recovery mid-playback.
 func TestReResolveSelfHealDoesNotBroadcast(t *testing.T) {
 	backend := wispTestBackend(t)
