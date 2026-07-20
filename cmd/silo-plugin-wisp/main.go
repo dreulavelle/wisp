@@ -10,6 +10,7 @@ import (
 	_ "embed"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -41,6 +42,8 @@ type runtimeServer struct {
 	manifest *pluginv1.PluginManifest
 	routes   *plugin.HTTPRoutes
 	log      *slog.Logger
+	library  *plugin.Library
+	recorder *plugin.Recorder
 
 	mu  sync.Mutex
 	cfg settings
@@ -82,9 +85,24 @@ func (s *runtimeServer) Configure(_ context.Context, req *pluginv1.ConfigureRequ
 		return &pluginv1.ConfigureResponse{}, nil
 	}
 
+	host := next.aioURL
+	if u, err := url.Parse(next.aioURL); err == nil && u.Host != "" {
+		host = u.Host
+	}
+
 	resolver := plugin.NewResolver(aiostreams.New(next.aioURL, next.aioPassword))
-	s.routes.SetHandler(plugin.NewRouter(resolver, s.log).Handler())
-	s.log.Info("configure: resolver ready", "library_path", next.libraryPath)
+	s.routes.SetHandler(plugin.NewRouterWith(plugin.RouterOptions{
+		Resolver: resolver,
+		Log:      s.log,
+		Version:  s.manifest.GetVersion(),
+		Settings: plugin.Settings{AIOStreamsHost: host, LibraryPath: next.libraryPath},
+		Library:  s.library,
+		Recorder: s.recorder,
+		// Derived from configuration so placeholder URLs stay valid across
+		// restarts without persisting a secret anywhere.
+		Signer: plugin.NewSigner(next.aioURL, next.aioPassword),
+	}).Handler())
+	s.log.Info("configure: resolver ready", "aiostreams_host", host, "library_path", next.libraryPath)
 
 	return &pluginv1.ConfigureResponse{}, nil
 }
@@ -102,7 +120,13 @@ func main() {
 
 	sdkruntime.Serve(sdkruntime.ServeConfig{
 		Servers: sdkruntime.CapabilityServers{
-			Runtime:    &runtimeServer{manifest: manifest, routes: routes, log: log},
+			Runtime: &runtimeServer{
+				manifest: manifest,
+				routes:   routes,
+				log:      log,
+				library:  plugin.NewLibrary(),
+				recorder: plugin.NewRecorder(),
+			},
 			HttpRoutes: routes,
 		},
 	})

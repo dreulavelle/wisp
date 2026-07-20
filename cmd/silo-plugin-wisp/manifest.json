@@ -61,6 +61,15 @@
       "method": "GET",
       "path": "/healthz",
       "access": "public"
+    },
+    {
+      "id": "admin",
+      "method": "*",
+      "path": "/admin/*",
+      "access": "admin",
+      "navigable": true,
+      "navigationKind": "admin",
+      "navigationLabel": "Wisp"
     }
   ],
   "presentation": {

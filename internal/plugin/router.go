@@ -11,26 +11,87 @@ import (
 	"github.com/dreulavelle/wisp/internal/aiostreams"
 )
 
+// Settings is the operator-facing configuration the dashboard displays.
+type Settings struct {
+	// AIOStreamsHost is the host only, never the full URL: the URL embeds the
+	// instance's encrypted config blob, which is effectively a credential.
+	AIOStreamsHost string
+	LibraryPath    string
+	DefaultQuality string
+}
+
 // Router builds the HTTP surface Silo mounts for this plugin.
 type Router struct {
 	resolver *Resolver
 	log      *slog.Logger
 	started  time.Time
+	version  string
+	settings Settings
+	library  *Library
+	recorder *Recorder
+	signer   *Signer
+}
+
+// RouterOptions configures a Router.
+type RouterOptions struct {
+	Resolver *Resolver
+	Log      *slog.Logger
+	Version  string
+	Settings Settings
+	Library  *Library
+	Recorder *Recorder
+	// Signer authenticates resolver requests. Nil disables verification, which
+	// is only appropriate in tests: the resolver route is public, so an
+	// unsigned deployment lets anyone mint stream links.
+	Signer *Signer
 }
 
 // NewRouter returns the plugin's HTTP handler.
 func NewRouter(resolver *Resolver, log *slog.Logger) *Router {
-	if log == nil {
-		log = slog.New(slog.DiscardHandler)
+	return NewRouterWith(RouterOptions{Resolver: resolver, Log: log})
+}
+
+// NewRouterWith builds a router with the full dashboard surface wired up.
+func NewRouterWith(opts RouterOptions) *Router {
+	if opts.Log == nil {
+		opts.Log = slog.New(slog.DiscardHandler)
 	}
-	return &Router{resolver: resolver, log: log, started: time.Now()}
+	if opts.Library == nil {
+		opts.Library = NewLibrary()
+	}
+	if opts.Recorder == nil {
+		opts.Recorder = NewRecorder()
+	}
+	return &Router{
+		resolver: opts.Resolver,
+		log:      opts.Log,
+		started:  time.Now(),
+		version:  opts.Version,
+		settings: opts.Settings,
+		library:  opts.Library,
+		recorder: opts.Recorder,
+		signer:   opts.Signer,
+	}
 }
 
 // Handler returns the mux serving every plugin route.
+//
+// Access levels are declared in the manifest, not enforced here: Silo gates
+// /admin/* to admins before the request ever reaches this process. The split
+// matters because /resolve/* must stay reachable without a Silo session — the
+// client following a placeholder redirect is ffmpeg or a browser, neither of
+// which carries one.
 func (rt *Router) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", rt.handleHealth)
 	mux.HandleFunc("/resolve/", rt.handleResolve)
+
+	mux.HandleFunc("/admin/api/status", rt.adminStatus)
+	mux.HandleFunc("/admin/api/placeholders", rt.adminPlaceholders)
+	mux.HandleFunc("/admin/api/activity", rt.adminActivity)
+	mux.HandleFunc("/admin/api/settings", rt.adminSettings)
+	mux.HandleFunc("/admin/", rt.adminIndex)
+	mux.HandleFunc("/admin", rt.adminIndex)
 	return mux
 }
 
@@ -66,14 +127,43 @@ func (rt *Router) handleResolve(w http.ResponseWriter, r *http.Request) {
 	}
 	req.Quality = strings.TrimSpace(r.URL.Query().Get("quality"))
 
+	// Authenticate before doing any upstream work. An unsigned request must
+	// cost nothing: otherwise the public route becomes a way to drive load
+	// against the operator's provider without even obtaining a stream.
+	if rt.signer != nil && !rt.signer.Verify(req, r.URL.Query().Get("t")) {
+		rt.log.Warn("resolve: rejected unsigned request",
+			"path", r.URL.Path, "remote", r.RemoteAddr)
+		// Deliberately indistinguishable from an unknown path: a distinct
+		// "bad token" reply would confirm which titles exist.
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+
 	start := time.Now()
 	stream, err := rt.resolver.Resolve(r.Context(), req)
 	elapsed := time.Since(start)
 
 	if err != nil {
+		rt.recorder.Record(Activity{
+			At: start, IMDbID: req.IMDbID, Quality: req.Quality,
+			SearchMS: elapsed.Milliseconds(), TotalMS: elapsed.Milliseconds(),
+			Error: shortReason(err),
+		})
+		rt.library.MarkFailed(req.IMDbID, req.Season, req.Episode, shortReason(err))
 		rt.writeResolveError(w, req, err, elapsed)
 		return
 	}
+
+	// Selection is in-process and effectively free; splitting it out anyway
+	// makes it obvious on the dashboard that latency lives upstream, which is
+	// the first question an operator asks when playback feels slow.
+	rt.recorder.Record(Activity{
+		At: start, Title: stream.Filename, IMDbID: req.IMDbID,
+		Quality:  stream.Resolution,
+		SearchMS: elapsed.Milliseconds(), SelectMS: 0, RedirectMS: 0,
+		TotalMS: elapsed.Milliseconds(),
+	})
+	rt.library.MarkResolved(req.IMDbID, req.Season, req.Episode)
 
 	rt.log.Info("resolve: redirecting",
 		"media_type", req.MediaType, "imdb_id", req.IMDbID,
@@ -121,6 +211,19 @@ func isTransient(err error) bool {
 		return searchErr.Kind == aiostreams.KindTransient
 	}
 	return false
+}
+
+// shortReason renders an error for display without echoing upstream text,
+// which can carry credentials embedded in resolver URLs.
+func shortReason(err error) string {
+	switch {
+	case errors.Is(err, ErrNoMatch):
+		return "no playable stream"
+	case isTransient(err):
+		return "provider unavailable"
+	default:
+		return "resolution failed"
+	}
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

@@ -1,0 +1,338 @@
+<!doctype html>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Wisp</title>
+<style>
+  /* A wisp is a light that appears only for a moment, which is exactly what a
+     placeholder does: it holds nothing until someone presses play. The palette
+     commits to that — a cold, near-lightless base, with warmth reserved
+     strictly for the instant of resolution. Gold never appears on anything
+     that is merely idle. */
+  :root {
+    --void: #0a0e13;
+    --surface: #10161d;
+    --raised: #151d26;
+    --line: #1d2833;
+    --line-soft: #16202a;
+    --text: #dbe3ec;
+    --dim: #8a9aab;
+    --faint: #5b6b7b;
+    --wisp: #f2d98a; /* resolution, and nothing else */
+    --wisp-dim: #6b5f3c;
+    --cold: #7fb6d9; /* pending, in flight */
+    --fault: #e0736e;
+    --mono: ui-monospace, "SF Mono", SFMono-Regular, "JetBrains Mono", Menlo,
+      Consolas, monospace;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    --r: 3px;
+  }
+
+  @media (prefers-color-scheme: light) {
+    :root {
+      --void: #f2f4f6;
+      --surface: #ffffff;
+      --raised: #f7f9fb;
+      --line: #dde3ea;
+      --line-soft: #e8edf2;
+      --text: #14202b;
+      --dim: #52646f;
+      --faint: #8595a3;
+      --wisp: #8a6a12;
+      --wisp-dim: #d8c88f;
+      --cold: #2c6f96;
+      --fault: #b3403c;
+    }
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--void);
+    color: var(--text);
+    font: 400 14px/1.5 var(--sans);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* Monospace carries the display role. For a tool whose whole subject is
+     paths, ids, and latencies, the data face is the honest voice of the
+     product — a decorative serif would be borrowed personality. */
+  .eyebrow {
+    font: 500 10px/1 var(--mono);
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--faint);
+  }
+
+  header {
+    display: flex;
+    align-items: baseline;
+    gap: 16px;
+    padding: 22px 24px 18px;
+    border-bottom: 1px solid var(--line);
+    flex-wrap: wrap;
+  }
+  h1 {
+    margin: 0;
+    font: 500 19px/1 var(--mono);
+    letter-spacing: -0.02em;
+  }
+  h1 .dot {
+    color: var(--wisp);
+    /* The only ambient motion on the page: a slow pulse on the one glyph that
+       stands for a live resolver. */
+    animation: breathe 3.6s ease-in-out infinite;
+  }
+  @keyframes breathe { 0%, 100% { opacity: 0.35; } 50% { opacity: 1; } }
+
+  header .spacer { flex: 1; }
+  header .ver { font: 400 11px/1 var(--mono); color: var(--faint); }
+
+  main {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 320px;
+    gap: 1px;
+    background: var(--line-soft);
+    min-height: calc(100vh - 61px);
+  }
+  @media (max-width: 900px) {
+    main { grid-template-columns: minmax(0, 1fr); }
+  }
+
+  .col { background: var(--void); padding: 20px 24px 40px; min-width: 0; }
+  .col + .col { background: var(--void); }
+
+  section { margin-bottom: 34px; }
+  section > .eyebrow { display: block; margin-bottom: 12px; }
+
+  /* Health tiles: a row of small facts, no gradients, no oversized numerals.
+     Density is the point for this audience. */
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(128px, 1fr)); gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: var(--r); }
+  .tile { background: var(--surface); padding: 12px 14px; }
+  .tile dt { font: 500 10px/1 var(--mono); letter-spacing: 0.14em; text-transform: uppercase; color: var(--faint); margin: 0 0 7px; }
+  .tile dd { margin: 0; font: 500 17px/1.1 var(--mono); letter-spacing: -0.01em; }
+  .tile dd.ok { color: var(--wisp); }
+  .tile dd.bad { color: var(--fault); }
+  .tile dd small { font-size: 11px; color: var(--dim); font-weight: 400; letter-spacing: 0; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  thead th {
+    text-align: left;
+    font: 500 10px/1 var(--mono);
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--faint);
+    padding: 0 10px 9px;
+    border-bottom: 1px solid var(--line);
+    white-space: nowrap;
+  }
+  tbody td { padding: 9px 10px; border-bottom: 1px solid var(--line-soft); vertical-align: middle; }
+  tbody tr:hover td { background: var(--surface); }
+  td.path { font: 400 12px/1.4 var(--mono); color: var(--text); word-break: break-all; }
+  td.path .dir { color: var(--faint); }
+  td.num { font: 400 12px/1 var(--mono); color: var(--dim); text-align: right; white-space: nowrap; }
+
+  /* State is carried by form, not just hue: a placeholder that has never
+     resolved is drawn hollow, because that is what it is. */
+  .state { display: inline-flex; align-items: center; gap: 7px; font: 400 12px/1 var(--mono); white-space: nowrap; }
+  .state::before { content: ""; width: 7px; height: 7px; border-radius: 50%; flex: none; }
+  .state.idle { color: var(--faint); }
+  .state.idle::before { border: 1px solid var(--faint); }
+  .state.live { color: var(--wisp); }
+  .state.live::before { background: var(--wisp); box-shadow: 0 0 8px var(--wisp-dim); }
+  .state.pending { color: var(--cold); }
+  .state.pending::before { border: 1px solid var(--cold); background: color-mix(in srgb, var(--cold) 35%, transparent); }
+  .state.fault { color: var(--fault); }
+  .state.fault::before { background: var(--fault); }
+
+  /* SIGNATURE — the hop trace.
+     Wisp's entire job is getting from a placeholder to bytes, through a chain
+     of hops. Rendering each resolve as a segmented latency bar shows the thing
+     the product actually does, and makes a slow hop obvious at a glance in a
+     way a single "1.8s" number never could. */
+  .trace { display: flex; flex-direction: column; gap: 11px; }
+  .hop { display: grid; grid-template-columns: 1fr auto; gap: 4px 10px; align-items: baseline; }
+  .hop .title { font: 400 12px/1.3 var(--mono); color: var(--text); word-break: break-all; }
+  .hop .total { font: 500 12px/1 var(--mono); color: var(--wisp); }
+  .hop .total.slow { color: var(--fault); }
+  .hop .bar { grid-column: 1 / -1; display: flex; height: 4px; border-radius: 2px; overflow: hidden; background: var(--line); }
+  .hop .seg { height: 100%; }
+  .hop .seg.search { background: var(--cold); }
+  .hop .seg.select { background: var(--wisp-dim); }
+  .hop .seg.redirect { background: var(--wisp); }
+  .hop .legend { grid-column: 1 / -1; font: 400 10px/1 var(--mono); color: var(--faint); letter-spacing: 0.04em; }
+
+  .key { display: flex; gap: 14px; flex-wrap: wrap; margin-top: 14px; }
+  .key span { display: inline-flex; align-items: center; gap: 6px; font: 400 10px/1 var(--mono); letter-spacing: 0.1em; text-transform: uppercase; color: var(--faint); }
+  .key i { width: 10px; height: 4px; border-radius: 2px; display: inline-block; }
+
+  .field { margin-bottom: 16px; }
+  .field label { display: block; font: 500 10px/1 var(--mono); letter-spacing: 0.14em; text-transform: uppercase; color: var(--faint); margin-bottom: 6px; }
+  .field .val { font: 400 12px/1.5 var(--mono); color: var(--text); word-break: break-all; background: var(--surface); border: 1px solid var(--line); border-radius: var(--r); padding: 8px 10px; }
+  .field .val.unset { color: var(--faint); }
+  .hint { font-size: 12px; color: var(--dim); margin: 10px 0 0; line-height: 1.55; }
+  .hint a { color: var(--cold); }
+
+  .empty { border: 1px dashed var(--line); border-radius: var(--r); padding: 26px 20px; text-align: center; }
+  .empty p { margin: 0 0 6px; font: 400 13px/1.5 var(--sans); color: var(--dim); }
+  .empty .eyebrow { display: block; margin-bottom: 10px; }
+
+  a:focus-visible, button:focus-visible { outline: 2px solid var(--cold); outline-offset: 2px; }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { animation: none !important; transition: none !important; }
+  }
+</style>
+
+<header>
+  <h1><span class="dot">&#9679;</span> wisp</h1>
+  <span class="eyebrow" id="tagline">on-demand playback</span>
+  <span class="spacer"></span>
+  <span class="ver" id="version"></span>
+</header>
+
+<main>
+  <div class="col">
+    <section>
+      <span class="eyebrow">Health</span>
+      <dl class="tiles" id="tiles"></dl>
+    </section>
+
+    <section>
+      <span class="eyebrow">Placeholders</span>
+      <div id="placeholders"></div>
+    </section>
+  </div>
+
+  <div class="col">
+    <section>
+      <span class="eyebrow">Recent resolves</span>
+      <div id="activity"></div>
+      <div class="key">
+        <span><i style="background:var(--cold)"></i> search</span>
+        <span><i style="background:var(--wisp-dim)"></i> select</span>
+        <span><i style="background:var(--wisp)"></i> redirect</span>
+      </div>
+    </section>
+
+    <section>
+      <span class="eyebrow">Settings</span>
+      <div id="settings"></div>
+      <p class="hint">
+        Settings are managed in Silo under Plugins &rarr; Wisp. Changes apply
+        without a restart.
+      </p>
+    </section>
+  </div>
+</main>
+
+<script>
+  // Silo mounts plugin routes under a prefix it chooses, so derive the API base
+  // from where this page was actually served rather than assuming a depth.
+  const BASE = location.pathname.replace(/\/admin(\/.*)?$/, "");
+  const api = (p) => fetch(`${BASE}/admin/api${p}`, { headers: { Accept: "application/json" } })
+    .then((r) => (r.ok ? r.json() : Promise.reject(new Error(r.status))));
+
+  const $ = (id) => document.getElementById(id);
+  const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+  const ms = (n) => (n == null ? "—" : n < 1000 ? `${Math.round(n)}ms` : `${(n / 1000).toFixed(2)}s`);
+
+  function ago(iso) {
+    if (!iso) return "never";
+    const s = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000);
+    if (s < 60) return `${Math.floor(s)}s ago`;
+    if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+    if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
+    return `${Math.floor(s / 86400)}d ago`;
+  }
+
+  function splitPath(p) {
+    const i = String(p).lastIndexOf("/");
+    return i < 0 ? ["", p] : [p.slice(0, i + 1), p.slice(i + 1)];
+  }
+
+  function renderTiles(s) {
+    const healthy = s.resolver_ready;
+    $("tiles").innerHTML = [
+      ["Resolver", healthy ? `<span class="ok">ready</span>` : `<span class="bad">not configured</span>`],
+      ["Placeholders", `${s.placeholders ?? 0}`],
+      ["Resolved today", `${s.resolved_today ?? 0}`],
+      ["Median resolve", ms(s.median_resolve_ms)],
+      ["Failures 24h", `${s.failures_24h ?? 0}`],
+      ["Uptime", `${Math.floor((s.uptime_seconds ?? 0) / 3600)}<small>h</small>`],
+    ].map(([k, v]) => `<div class="tile"><dt>${k}</dt><dd>${v}</dd></div>`).join("");
+    $("version").textContent = s.version ? `v${s.version}` : "";
+  }
+
+  function renderPlaceholders(rows) {
+    if (!rows.length) {
+      $("placeholders").innerHTML = `
+        <div class="empty">
+          <span class="eyebrow">Nothing here yet</span>
+          <p>Request a title in Silo. Wisp writes a placeholder immediately, and it appears here after the next scan.</p>
+        </div>`;
+      return;
+    }
+    $("placeholders").innerHTML = `
+      <table>
+        <thead><tr><th>Item</th><th>State</th><th style="text-align:right">Last resolve</th><th style="text-align:right">Plays</th></tr></thead>
+        <tbody>${rows.map((r) => {
+          const [dir, file] = splitPath(r.path);
+          const state = r.last_error ? "fault" : r.last_resolved_at ? "live" : "idle";
+          const label = r.last_error ? "failed" : r.last_resolved_at ? "resolving" : "never played";
+          return `<tr>
+            <td class="path"><span class="dir">${esc(dir)}</span>${esc(file)}</td>
+            <td><span class="state ${state}">${label}</span></td>
+            <td class="num">${ago(r.last_resolved_at)}</td>
+            <td class="num">${r.plays ?? 0}</td>
+          </tr>`;
+        }).join("")}</tbody>
+      </table>`;
+  }
+
+  function renderActivity(rows) {
+    if (!rows.length) {
+      $("activity").innerHTML = `
+        <div class="empty">
+          <span class="eyebrow">No resolves yet</span>
+          <p>Press play on a placeholder and the hop trace shows up here.</p>
+        </div>`;
+      return;
+    }
+    $("activity").innerHTML = `<div class="trace">${rows.map((r) => {
+      const total = Math.max(1, r.total_ms || 0);
+      const seg = (k, v) => `<div class="seg ${k}" style="width:${((v || 0) / total) * 100}%"></div>`;
+      return `<div class="hop">
+        <span class="title">${esc(r.title || r.imdb_id || "unknown")}</span>
+        <span class="total ${total > 10000 ? "slow" : ""}">${ms(total)}</span>
+        <div class="bar">${seg("search", r.search_ms)}${seg("select", r.select_ms)}${seg("redirect", r.redirect_ms)}</div>
+        <span class="legend">${esc(r.quality || "—")} &middot; ${ago(r.at)}${r.error ? ` &middot; ${esc(r.error)}` : ""}</span>
+      </div>`;
+    }).join("")}</div>`;
+  }
+
+  function renderSettings(s) {
+    const row = (label, value, unset) =>
+      `<div class="field"><label>${label}</label><div class="val${value ? "" : " unset"}">${esc(value || unset)}</div></div>`;
+    $("settings").innerHTML =
+      row("AIOStreams", s.aiostreams_host, "not configured") +
+      row("Library path", s.library_path, "not configured") +
+      row("Default quality", s.default_quality, "any");
+  }
+
+  async function refresh() {
+    const [status, placeholders, activity, settings] = await Promise.all([
+      api("/status").catch(() => ({})),
+      api("/placeholders").catch(() => []),
+      api("/activity").catch(() => []),
+      api("/settings").catch(() => ({})),
+    ]);
+    renderTiles(status);
+    renderPlaceholders(placeholders.items || placeholders || []);
+    renderActivity(activity.items || activity || []);
+    renderSettings(settings);
+  }
+
+  refresh();
+  setInterval(refresh, 5000);
+</script>
