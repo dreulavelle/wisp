@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/dreulavelle/wisp/internal/library"
 )
 
 // Config holds everything Wisp needs to serve a resolver-backed library.
@@ -27,6 +29,13 @@ type Config struct {
 	// mounted any more, so this is an ordinary directory both wisp and the
 	// media server can read.
 	LibraryPath string
+	// APIToken, when set, requires `Authorization: Bearer <token>` on the
+	// control-plane endpoints (everything under /api/ except the health probes,
+	// plus /metrics). Empty — the default — disables authentication entirely and
+	// serves the API to anyone who can reach the port, which is how wisp has
+	// always behaved; existing deployments are unaffected by upgrading. The file
+	// -serving data plane is never gated (see cmd/wisp newMux).
+	APIToken string
 	// SiloWebhookURL is the deprecated alias for NotifyArrWebhookURL
 	// (WISP_SILO_WEBHOOK_URL). It still works; the canonical name wins if both
 	// are set.
@@ -46,7 +55,23 @@ type Config struct {
 	// per-folder partial scans.
 	NotifyPlexURL   string
 	NotifyPlexToken string
-	LogLevel        string
+	// NotifyMountPath is the absolute library root as seen by notification
+	// targets. Empty falls back to LibraryPath, and then to the notifier's
+	// historical /mnt/wisp default.
+	NotifyMountPath string
+	// NotifyDebounce is the quiet period used to coalesce a burst of pins into
+	// one media-server notification per parent directory. Zero disables
+	// coalescing entirely, restoring one immediate notification per file — the
+	// escape hatch for a consumer that cannot handle batched events. Clamped
+	// to [1s, 60s] when non-zero.
+	NotifyDebounce time.Duration
+	// NotifyMountPathDefaulted reports that notification targets are configured
+	// but neither WISP_NOTIFY_MOUNT_PATH nor WISP_MOUNT_PATH was set, so the
+	// notifier's built-in default is in play. Load has no logger, so the caller
+	// owns the deprecation warning.
+	NotifyMountPathDefaulted bool
+	// LogLevel is one of debug, info, warn, error.
+	LogLevel string
 	// ReadChunkSize is the initial VFS read chunk in bytes; it doubles up to
 	// ReadChunkSizeLimit. Smaller reduces debrid over-fetch on seeks (more
 	// concurrent viewers per bandwidth); larger favors sequential throughput.
@@ -68,6 +93,18 @@ type Config struct {
 	// ScheduleInterval, never more than once per this duration — so wisp backs off
 	// hard yet still catches a late release. Falls back on empty/unparseable input.
 	TierBackoffMax time.Duration
+	// MinQuality is the lowest resolution tier wisp will request (WISP_MIN_QUALITY,
+	// default 1080p). A request below it is raised to it — a caller asking for 720p
+	// gets a strictly better file rather than a rejection. It is a floor on
+	// *requested* tiers only: a request that names no tier still means "best
+	// available" and stays unconstrained. Unrecognized input falls back to 1080p.
+	MinQuality string
+	// Allow2160p opts into 4K (WISP_ALLOW_2160P, default false). While disabled,
+	// 2160p is stripped from every intake, so it is never requested, never scraped,
+	// and never surfaced; a request naming ONLY 2160p is rejected outright rather
+	// than turned into a monitor that can never be satisfied.
+	Allow2160p bool
+
 	// TMDBAPIKey enables home-media release gating via TMDB (v3 key or v4 token).
 	TMDBAPIKey string
 	// TMDBMarkets is the ordered list of ISO-3166-1 regions whose digital/
@@ -85,6 +122,12 @@ type Config struct {
 	// starts only after the probe acquires a concurrency permit, so queue wait
 	// never eats the network budget. Clamped to [2s, 30s].
 	ProbeTimeout time.Duration
+
+	// LazyResolutionRequested reports that WISP_LAZY_RESOLUTION was set to a true
+	// value. The feature it enabled has been removed and the variable is ignored;
+	// it is still parsed so existing deployments that set it keep starting. Load
+	// has no logger, so the caller owns the deprecation warning.
+	LazyResolutionRequested bool
 }
 
 // Load reads configuration from environment variables and validates it.
@@ -95,6 +138,7 @@ func Load() (*Config, error) {
 		ListenAddr:           envOr("WISP_LISTEN_ADDR", ":8080"),
 		DBPath:               envOr("WISP_DB_PATH", "/data/wisp.db"),
 		LibraryPath:          libraryPath(),
+		APIToken:             strings.TrimSpace(os.Getenv("WISP_API_TOKEN")),
 		SiloWebhookURL:       strings.TrimSpace(os.Getenv("WISP_SILO_WEBHOOK_URL")),
 		NotifyArrWebhookURL:  strings.TrimSpace(os.Getenv("WISP_NOTIFY_ARR_WEBHOOK_URL")),
 		NotifyJellyfinURL:    strings.TrimSpace(os.Getenv("WISP_NOTIFY_JELLYFIN_URL")),
@@ -103,22 +147,56 @@ func Load() (*Config, error) {
 		NotifyEmbyAPIKey:     strings.TrimSpace(os.Getenv("WISP_NOTIFY_EMBY_API_KEY")),
 		NotifyPlexURL:        strings.TrimSpace(os.Getenv("WISP_NOTIFY_PLEX_URL")),
 		NotifyPlexToken:      strings.TrimSpace(os.Getenv("WISP_NOTIFY_PLEX_TOKEN")),
+		NotifyDebounce:       clampNotifyDebounce(optionalDurationEnv("WISP_NOTIFY_DEBOUNCE", 5*time.Second)),
+		NotifyMountPath:      strings.TrimSpace(os.Getenv("WISP_NOTIFY_MOUNT_PATH")),
 		LogLevel:             strings.ToLower(envOr("WISP_LOG_LEVEL", "info")),
 		ReadChunkSize:        sizeEnv("WISP_READ_CHUNK_SIZE", 32<<20),
 		ReadChunkSizeLimit:   sizeEnv("WISP_READ_CHUNK_SIZE_LIMIT", 512<<20),
 		ScheduleInterval:     durationEnv("WISP_SCHEDULE_INTERVAL", 2*time.Hour),
 		ResolveConcurrency:   clampInt(intEnv("WISP_RESOLVE_CONCURRENCY", 4), 1, 16),
 		TierBackoffMax:       durationEnv("WISP_TIER_BACKOFF_MAX", 7*24*time.Hour),
+		MinQuality:           qualityEnv("WISP_MIN_QUALITY", "1080p"),
+		Allow2160p:           boolEnv("WISP_ALLOW_2160P", false),
 		TMDBAPIKey:           strings.TrimSpace(os.Getenv("WISP_TMDB_API_KEY")),
 		TMDBMarkets:          listEnv("WISP_TMDB_MARKETS", []string{"US", "CA", "GB", "AU", "DE", "FR", "IT", "ES", "JP", "IN"}),
 		ProbeConcurrency:     clampInt(intEnv("WISP_PROBE_CONCURRENCY", 8), 1, 32),
 		ProbeWindow:          clampInt(intEnv("WISP_PROBE_WINDOW", 3), 1, 8),
 		ProbeTimeout:         clampDuration(durationEnv("WISP_PROBE_TIMEOUT", 10*time.Second), 2*time.Second, 30*time.Second),
+		// Removed feature, still accepted so setting it is not a startup failure.
+		LazyResolutionRequested: boolEnv("WISP_LAZY_RESOLUTION", false),
 	}
 	if c.AIOStreamsURL == "" {
 		return nil, fmt.Errorf("WISP_AIOSTREAMS_URL is required")
 	}
+	if c.NotifyMountPath == "" {
+		c.NotifyMountPath = c.LibraryPath
+	}
+	// Neither path is set but something wants notifying: the notifier's
+	// /mnt/wisp default carries the deployment. That default is deprecated and
+	// becomes an error in a future major, so flag it for the caller to warn on.
+	c.NotifyMountPathDefaulted = c.NotifyMountPath == "" && c.notifyEnabled()
 	return c, nil
+}
+
+// QualityPolicy is the tier policy the intake paths enforce.
+func (c *Config) QualityPolicy() library.QualityPolicy {
+	return library.QualityPolicy{Min: c.MinQuality, Allow2160p: c.Allow2160p}
+}
+
+// qualityEnv parses a resolution tier ("1080p", "4k", …) into wisp's canonical
+// vocabulary, falling back on empty or unrecognized input.
+func qualityEnv(key, fallback string) string {
+	if q := library.NormalizeQuality(os.Getenv(key)); q != "" {
+		return q
+	}
+	return fallback
+}
+
+// notifyEnabled reports whether at least one media-server notification target
+// is configured.
+func (c *Config) notifyEnabled() bool {
+	return c.NotifyArrWebhookURL != "" || c.SiloWebhookURL != "" ||
+		c.NotifyJellyfinURL != "" || c.NotifyEmbyURL != "" || c.NotifyPlexURL != ""
 }
 
 // durationEnv parses a Go duration like "2h" or "90m", falling back on empty or
@@ -133,6 +211,31 @@ func durationEnv(key string, fallback time.Duration) time.Duration {
 		return fallback
 	}
 	return d
+}
+
+// optionalDurationEnv parses a Go duration like durationEnv, except that an
+// explicit zero ("0", "0s") is honored rather than treated as absent — zero is
+// how an optional knob is switched off. Empty, negative, or unparseable input
+// still falls back.
+func optionalDurationEnv(key string, fallback time.Duration) time.Duration {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return fallback
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d < 0 {
+		return fallback
+	}
+	return d
+}
+
+// clampNotifyDebounce bounds a non-zero debounce window to a sane range; zero
+// passes through untouched to mean "disabled".
+func clampNotifyDebounce(d time.Duration) time.Duration {
+	if d == 0 {
+		return 0
+	}
+	return clampDuration(d, time.Second, time.Minute)
 }
 
 // intEnv parses a base-10 integer, falling back on empty or unparseable input.

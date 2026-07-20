@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"path"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -42,8 +43,28 @@ type Notifier interface {
 // its own payload shape and transport; the Multi fans events out to all of them.
 type target interface {
 	Notifier
-	// name identifies the target in log lines.
+	// name identifies the target in log lines and as the Prometheus label.
 	name() string
+	// metrics returns the target's own delivery-outcome counters. Each target
+	// owns its counters for the life of the notifier, so recording an outcome
+	// is a bare atomic add with no lookup or lock on the delivery path.
+	metrics() *targetMetrics
+	// ImportBatch delivers a burst of imports that share a media type and a
+	// parent directory. Each target decides how to represent the burst — the
+	// right answer differs per protocol, so this is deliberately not a loop
+	// over Import. A batch of exactly one file must be delivered identically
+	// to the equivalent Import call, which is what makes a disabled debounce
+	// window byte-for-byte equivalent to the pre-coalescing behavior.
+	ImportBatch(ctx context.Context, b importBatch)
+}
+
+// importBatch is a set of imports coalesced over one debounce window. Every
+// file shares mediaType and dir; files are library-relative virtual paths in
+// arrival order, deduplicated.
+type importBatch struct {
+	mediaType string
+	dir       string
+	files     []string
 }
 
 // Options configures which targets a notifier drives. Empty fields disable the
@@ -72,6 +93,12 @@ type Options struct {
 	// MountPath is where the media servers see wisp's library on disk; virtual
 	// paths are resolved against it. Empty defaults to /mnt/wisp.
 	MountPath string
+
+	// Debounce is the quiet period used to coalesce a burst of imports into one
+	// notification per parent directory. Zero (or negative) disables coalescing
+	// and restores immediate per-file notifications. The companion max-wait
+	// bound is derived from it (see maxWaitFor).
+	Debounce time.Duration
 }
 
 // New builds a Notifier from the configured targets. It always returns a
@@ -110,6 +137,16 @@ func New(opts Options, log *slog.Logger) *Multi {
 	if url := strings.TrimSpace(opts.PlexURL); url != "" {
 		m.targets = append(m.targets, newPlexTarget(url, opts.PlexToken, mountPath, log))
 	}
+	if opts.Debounce > 0 {
+		m.coalesce = newCoalescer(opts.Debounce, maxWaitFor(opts.Debounce), func(b importBatch) {
+			// A coalesced batch outlives whichever request produced it, so it
+			// starts from a fresh context rather than a stored caller context.
+			m.emitImport(context.Background(), b)
+		})
+	}
+	// Hold one reference for Close to release. Keeping the counter above zero
+	// for the notifier's whole life means fanout's Add can never race Wait.
+	m.wg.Add(1)
 	return m
 }
 
@@ -118,7 +155,18 @@ type Multi struct {
 	targets   []target
 	mountPath string
 	log       *slog.Logger
+
+	// coalesce batches import bursts; nil when debouncing is disabled.
+	coalesce *coalescer
+
+	// wg tracks in-flight delivery goroutines so Close can drain them.
+	wg        sync.WaitGroup
+	closeOnce sync.Once
 }
+
+// MountPath returns the library root that virtual paths are resolved against,
+// after the default has been applied (for startup logging).
+func (m *Multi) MountPath() string { return m.mountPath }
 
 // Targets returns the names of the configured targets (for startup logging).
 func (m *Multi) Targets() []string {
@@ -129,8 +177,50 @@ func (m *Multi) Targets() []string {
 	return names
 }
 
+// Import announces a newly pinned file. When debouncing is enabled the event
+// joins its parent directory's batch instead of being delivered immediately;
+// see coalescer for why. Either way the call does not block on the network.
 func (m *Multi) Import(ctx context.Context, mediaType, virtualPath string) {
-	m.fanout(ctx, func(ctx context.Context, t target) { t.Import(ctx, mediaType, virtualPath) })
+	if m == nil || len(m.targets) == 0 {
+		return
+	}
+	if m.coalesce == nil {
+		m.emitImport(ctx, importBatch{mediaType: mediaType, dir: path.Dir(virtualPath), files: []string{virtualPath}})
+		return
+	}
+	m.coalesce.add(mediaType, virtualPath)
+}
+
+// emitImport fans one finished batch out to every target.
+func (m *Multi) emitImport(ctx context.Context, b importBatch) {
+	m.fanout(ctx, func(ctx context.Context, t target) { t.ImportBatch(ctx, b) })
+}
+
+// Close flushes any pending coalesced imports and waits for in-flight
+// deliveries to finish, bounded by ctx. Call it once, from the shutdown path,
+// so a pin that landed inside the debounce window is not dropped by a restart.
+// Events arriving after Close are delivered immediately rather than batched.
+func (m *Multi) Close(ctx context.Context) {
+	if m == nil {
+		return
+	}
+	m.closeOnce.Do(func() {
+		if m.coalesce != nil {
+			m.coalesce.close()
+		}
+		m.wg.Done() // release the construction-time reference
+	})
+
+	done := make(chan struct{})
+	go func() {
+		m.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-ctx.Done():
+		m.log.Warn("gave up draining media-server notifications", "error", ctx.Err())
+	}
 }
 
 func (m *Multi) Rename(ctx context.Context, mediaType, previousPath, newPath string) {
@@ -149,7 +239,9 @@ func (m *Multi) fanout(ctx context.Context, fn func(context.Context, target)) {
 	}
 	base := context.WithoutCancel(ctx)
 	for _, t := range m.targets {
+		m.wg.Add(1)
 		go func(t target) {
+			defer m.wg.Done()
 			fctx, cancel := context.WithTimeout(base, notifyTimeout)
 			defer cancel()
 			fn(fctx, t)

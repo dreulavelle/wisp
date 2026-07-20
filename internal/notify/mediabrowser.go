@@ -29,6 +29,7 @@ type mediaBrowserTarget struct {
 	url        string
 	httpClient *http.Client
 	log        *slog.Logger
+	stats      targetMetrics
 }
 
 // mediaUpdate is one entry in a Library/Media/Updated request. Jellyfin and Emby
@@ -50,10 +51,29 @@ func newMediaBrowserTarget(cfg mediaBrowserConfig, log *slog.Logger) *mediaBrows
 
 func (t *mediaBrowserTarget) name() string { return t.cfg.flavor }
 
+func (t *mediaBrowserTarget) metrics() *targetMetrics { return &t.stats }
+
 func (t *mediaBrowserTarget) Import(ctx context.Context, _ /*mediaType*/, virtualPath string) {
 	t.send(ctx, "import", []mediaUpdate{
 		{Path: fullPath(t.cfg.mountPath, virtualPath), UpdateType: t.cfg.createType},
 	})
+}
+
+// ImportBatch sends a coalesced burst as one request carrying every exact file
+// path. Library/Media/Updated takes a list natively, so this target needs no
+// folder-scoping: the server is told precisely as much about each individual
+// file as before, just in one request instead of N.
+func (t *mediaBrowserTarget) ImportBatch(ctx context.Context, b importBatch) {
+	if len(b.files) == 0 {
+		return
+	}
+	updates := make([]mediaUpdate, 0, len(b.files))
+	for _, f := range b.files {
+		updates = append(updates, mediaUpdate{
+			Path: fullPath(t.cfg.mountPath, f), UpdateType: t.cfg.createType,
+		})
+	}
+	t.send(ctx, "import", updates)
 }
 
 func (t *mediaBrowserTarget) Rename(ctx context.Context, _ /*mediaType*/, previousPath, newPath string) {
@@ -83,6 +103,7 @@ func (t *mediaBrowserTarget) send(ctx context.Context, event string, updates []m
 		headers["X-Emby-Token"] = t.cfg.apiKey
 	}
 	status, err := postJSON(ctx, t.httpClient, t.url, headers, body)
+	t.stats.recordSend(status, err)
 	if err != nil {
 		t.log.Warn("mediabrowser delivery failed", "flavor", t.cfg.flavor, "event", event, "error", err)
 		return

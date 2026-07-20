@@ -133,6 +133,22 @@ curl "http://localhost:8080/api/requests/status?media_type=movie&tmdb_id=27205"
 (`/api/pins`), and exposes the scheduler (`/api/schedule`). Full endpoints,
 payloads, and status codes are in the [API Reference](docs/API-Reference.md).
 
+### Securing it
+
+**The API is unauthenticated by default** — anyone who can reach port 8080 can
+list or delete every pin and monitor. Set `WISP_API_TOKEN` to require
+`Authorization: Bearer <token>` on the API, and pass it on every call:
+
+```sh
+curl -H "Authorization: Bearer $WISP_API_TOKEN" http://localhost:8080/api/pins
+```
+
+The health endpoints stay open so container healthchecks keep working, and so
+does file serving so FUSE mounts keep working — meaning the token guards the
+API, not access to the media itself. Don't publish the port to an untrusted
+network either way. See
+[API authentication](docs/Configuration.md#api-authentication).
+
 ## Configuration
 
 Only `WISP_AIOSTREAMS_URL` and `WISP_AIOSTREAMS_PASSWORD` are required;

@@ -37,6 +37,7 @@ func offlineApp(t *testing.T) *app {
 		meta:    metadata.New("", nil, metadata.WithBaseURLs(stub.URL, stub.URL, stub.URL)),
 		webhook: notify.New(notify.Options{}, log),
 		prober:  testProber(),
+		quality: allowAllQualities,
 	}
 	a.mon = monitor.New(st, a.meta, a, time.Hour, 4, 7*24*time.Hour, log)
 	return a
@@ -134,11 +135,24 @@ func TestComputeRequestStatus(t *testing.T) {
 	servable := store.Pin{MediaType: "movie", Quality: "1080p", VirtualPath: "movies/x", SourceURL: "http://a", Size: 1}
 	unservable := store.Pin{MediaType: "movie", Quality: "1080p", VirtualPath: "movies/x", SourceURL: "", Size: 0}
 
+	// exhaustedAt stands in for monitor.TierExhausted: a tier is "given up on" once
+	// its unanimous-miss streak reaches n. The real predicate derives n from the
+	// backoff ramp; the gate only cares that some streaks count and others don't.
+	exhaustedAt := func(n int) tierExhaustedFunc {
+		return func(st store.TierBackoffState) bool { return st.Misses >= n }
+	}
+	// A 2160p tier that has been missing across the whole title for a long time,
+	// versus one that has only just started failing.
+	hardMiss := map[string]store.TierBackoffState{"2160p": {Misses: 8, NextTry: future}}
+	softMiss := map[string]store.TierBackoffState{"2160p": {Misses: 1, NextTry: now.Add(2 * time.Hour)}}
+	hd := store.Pin{MediaType: "series", Quality: "1080p", VirtualPath: "shows/x", SourceURL: "http://a", Size: 1}
+
 	cases := []struct {
 		name       string
 		mon        *store.Monitored
 		pins       []store.Pin
 		mediaType  string
+		exhausted  tierExhaustedFunc
 		wantState  string
 		wantDetail string
 	}{
@@ -203,10 +217,92 @@ func TestComputeRequestStatus(t *testing.T) {
 			mon:       &store.Monitored{MediaType: "series", Failed: true, LastError: "unresolvable identity"},
 			mediaType: "series", wantState: statusFailed, wantDetail: "unresolvable identity",
 		},
+
+		// --- unsatisfiable tiers must not block completion for ever ---
+		{
+			// Band of Brothers: 10 episodes, all 1080p pinned, no 2160p exists.
+			name: "series pending only on an exhausted tier completes and names it",
+			mon: &store.Monitored{MediaType: "series", LastChecked: now, Qualities: []string{"1080p", "2160p"},
+				PendingAired: 10, PendingByTier: map[string]int{"2160p": 10}, TierBackoff: hardMiss},
+			pins: []store.Pin{hd}, mediaType: "series", exhausted: exhaustedAt(8),
+			wantState:  statusCompleted,
+			wantDetail: "requested scope pinned; gave up on 2160p (no releases found at that quality after repeated checks)",
+		},
+		{
+			name: "series pending on a transiently-failing tier stays queued",
+			mon: &store.Monitored{MediaType: "series", LastChecked: now, Qualities: []string{"1080p", "2160p"},
+				PendingAired: 10, PendingByTier: map[string]int{"2160p": 10}, TierBackoff: softMiss},
+			pins: []store.Pin{hd}, mediaType: "series", exhausted: exhaustedAt(8),
+			wantState: statusQueued,
+		},
+		{
+			name: "series with nothing pinned never completes, however hopeless the tier",
+			mon: &store.Monitored{MediaType: "series", LastChecked: now, Qualities: []string{"2160p"},
+				PendingAired: 10, PendingByTier: map[string]int{"2160p": 10}, TierBackoff: hardMiss},
+			mediaType: "series", exhausted: exhaustedAt(8),
+			wantState: statusQueued,
+		},
+		{
+			name: "series with work left on an attainable tier stays queued",
+			mon: &store.Monitored{MediaType: "series", LastChecked: now, Qualities: []string{"1080p", "2160p"},
+				PendingAired: 12, PendingByTier: map[string]int{"2160p": 10, "1080p": 2}, TierBackoff: hardMiss},
+			pins: []store.Pin{hd}, mediaType: "series", exhausted: exhaustedAt(8),
+			wantState: statusQueued,
+		},
+		{
+			// Old record written before PendingByTier existed: nothing to discount, so
+			// the strict pre-existing behavior holds until the next scheduler pass.
+			name: "series without a per-tier breakdown discounts nothing",
+			mon: &store.Monitored{MediaType: "series", LastChecked: now, Qualities: []string{"1080p", "2160p"},
+				PendingAired: 10, TierBackoff: hardMiss},
+			pins: []store.Pin{hd}, mediaType: "series", exhausted: exhaustedAt(8),
+			wantState: statusQueued,
+		},
+		{
+			name: "series never checked is queued even with no pending work",
+			mon: &store.Monitored{MediaType: "series", Qualities: []string{"1080p", "2160p"},
+				PendingAired: 10, PendingByTier: map[string]int{"2160p": 10}, TierBackoff: hardMiss},
+			pins: []store.Pin{hd}, mediaType: "series", exhausted: exhaustedAt(8),
+			wantState: statusQueued,
+		},
+		{
+			name: "movie multi-tier: exhausted 2160p completes on the 1080p pin",
+			mon: &store.Monitored{MediaType: "movie", LastChecked: now, Qualities: []string{"1080p", "2160p"},
+				TierBackoff: hardMiss},
+			pins:      []store.Pin{servable},
+			mediaType: "movie", exhausted: exhaustedAt(8),
+			wantState:  statusCompleted,
+			wantDetail: "requested scope pinned; gave up on 2160p (no releases found at that quality after repeated checks)",
+		},
+		{
+			name: "movie multi-tier: transiently-failing 2160p stays queued",
+			mon: &store.Monitored{MediaType: "movie", LastChecked: now, Qualities: []string{"1080p", "2160p"},
+				TierBackoff: softMiss},
+			pins:      []store.Pin{servable},
+			mediaType: "movie", exhausted: exhaustedAt(8),
+			wantState: statusQueued,
+		},
+		{
+			// Backoff state for a tier nobody asked for must not shrink the scope.
+			name: "exhausted tier that was never requested is not discounted",
+			mon: &store.Monitored{MediaType: "movie", LastChecked: now, Qualities: []string{"1080p", "2160p"},
+				TierBackoff: map[string]store.TierBackoffState{"720p": {Misses: 8, NextTry: future}}},
+			pins:      []store.Pin{servable},
+			mediaType: "movie", exhausted: exhaustedAt(8),
+			wantState: statusQueued,
+		},
+		{
+			// Without the predicate wired in, nothing is ever discounted.
+			name: "nil exhausted predicate keeps the strict gate",
+			mon: &store.Monitored{MediaType: "series", LastChecked: now, Qualities: []string{"1080p", "2160p"},
+				PendingAired: 10, PendingByTier: map[string]int{"2160p": 10}, TierBackoff: hardMiss},
+			pins: []store.Pin{hd}, mediaType: "series",
+			wantState: statusQueued,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := computeRequestStatus(tc.mon, tc.pins, tc.mediaType, now)
+			got := computeRequestStatus(tc.mon, tc.pins, tc.mediaType, now, tc.exhausted)
 			if got.State != tc.wantState {
 				t.Fatalf("state = %q, want %q", got.State, tc.wantState)
 			}

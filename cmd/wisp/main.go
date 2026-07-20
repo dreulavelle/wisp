@@ -50,16 +50,49 @@ func main() {
 		log.Info("category backfill", "records_updated", n)
 	}
 
+	// One-shot cleanup for databases written by the removed lazy-resolution
+	// feature: its 1-byte placeholder pins are unplayable now that nothing
+	// resolves them on read. Dropping them lets the monitor re-pin eagerly.
+	if paths, err := st.DeleteUnresolved(context.Background()); err != nil {
+		log.Warn("placeholder cleanup", "error", err)
+	} else if len(paths) > 0 {
+		log.Warn("removed unresolved placeholder pins left by WISP_LAZY_RESOLUTION; monitored titles will be re-pinned eagerly on the next scheduler pass",
+			"pins_removed", len(paths))
+	}
+
+	// Bring stored monitors in line with the quality policy, so a disallowed tier
+	// stops being scraped rather than only being refused at intake.
+	qualityPolicy := cfg.QualityPolicy()
+	log.Info("quality policy", "min_quality", qualityPolicy.Min, "allow_2160p", qualityPolicy.Allow2160p)
+	if n, failed, err := st.ApplyQualityPolicy(context.Background(), qualityPolicy); err != nil {
+		log.Warn("quality policy migration", "error", err)
+	} else {
+		if n > 0 {
+			log.Info("quality policy applied to existing monitors", "monitors_updated", n)
+		}
+		if len(failed) > 0 {
+			log.Warn("monitors requested only a disallowed quality tier and were marked failed; they will report failed on /api/requests/status until re-requested at an allowed tier",
+				"monitors_failed", len(failed), "keys", failed)
+		}
+	}
+
 	notifier := notify.New(notify.Options{
 		ArrWebhookURL:  cfg.NotifyArrWebhookURL,
 		SiloWebhookURL: cfg.SiloWebhookURL,
 		JellyfinURL:    cfg.NotifyJellyfinURL, JellyfinAPIKey: cfg.NotifyJellyfinAPIKey,
 		EmbyURL: cfg.NotifyEmbyURL, EmbyAPIKey: cfg.NotifyEmbyAPIKey,
 		PlexURL: cfg.NotifyPlexURL, PlexToken: cfg.NotifyPlexToken,
-		MountPath: cfg.LibraryPath,
+		MountPath: cfg.NotifyMountPath, Debounce: cfg.NotifyDebounce,
 	}, log)
 	if targets := notifier.Targets(); len(targets) > 0 {
-		log.Info("media-server notifications enabled", "targets", targets)
+		log.Info("media-server notifications enabled", "targets", targets, "debounce", cfg.NotifyDebounce)
+	}
+	if cfg.NotifyMountPathDefaulted {
+		log.Warn("DEPRECATED: notification targets are configured but neither WISP_NOTIFY_MOUNT_PATH nor WISP_MOUNT_PATH is set; falling back to the built-in default library root. Set WISP_NOTIFY_MOUNT_PATH to the path your media server sees — relying on the default is deprecated and will become an error in a future major version",
+			"default_mount_path", notifier.MountPath())
+	}
+	if cfg.LazyResolutionRequested {
+		log.Warn("REMOVED: WISP_LAZY_RESOLUTION is set but lazy resolution has been removed and the setting has no effect; every monitored title is now resolved eagerly. The variable is still accepted so existing deployments keep starting, and will be deleted in a future major version — remove it from your configuration")
 	}
 
 	aio := aiostreams.New(cfg.AIOStreamsURL, cfg.AIOStreamsPassword)
@@ -76,6 +109,7 @@ func main() {
 			Timeout:     cfg.ProbeTimeout,
 		}, log),
 		startedAt: time.Now(),
+		quality:   qualityPolicy,
 	}
 	log.Info("probe limits", "concurrency", cfg.ProbeConcurrency, "window", cfg.ProbeWindow, "timeout", cfg.ProbeTimeout)
 	app.mon = monitor.New(st, app.meta, app, cfg.ScheduleInterval, cfg.ResolveConcurrency, cfg.TierBackoffMax, log)
@@ -89,23 +123,12 @@ func main() {
 	defer monCancel()
 	go app.mon.Run(monCtx)
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("POST /api/add", app.handleAdd)
-	mux.HandleFunc("GET /api/pins", app.handleListPins)
-	mux.HandleFunc("DELETE /api/pins", app.handleDeletePin)
-	mux.HandleFunc("POST /api/monitors", app.handleCreateMonitor)
-	mux.HandleFunc("GET /api/monitors", app.handleListMonitors)
-	mux.HandleFunc("DELETE /api/monitors", app.handleDeleteMonitor)
-	mux.HandleFunc("POST /api/monitors/refresh", app.handleRefreshMonitors)
-	mux.HandleFunc("GET /api/schedule", app.handleSchedule)
-	mux.HandleFunc("GET /api/requests/status", app.handleRequestStatus)
-	mux.HandleFunc("GET /api/status", app.handleStatus)
-	mux.HandleFunc("GET /metrics", app.handleMetrics)
-	mux.HandleFunc("GET /api/healthz", func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		fmt.Fprint(w, "ok")
-	})
-	mux.HandleFunc("/", srv.FileHandler)
+	if cfg.APIToken != "" {
+		log.Info("API authentication enabled; control-plane endpoints require Authorization: Bearer (health probes and file serving stay open)")
+	} else {
+		log.Warn("no WISP_API_TOKEN set; the API is unauthenticated and anyone who can reach this port can list or delete your pins and monitors — set WISP_API_TOKEN, or keep the port off untrusted networks")
+	}
+	mux := newMux(app, http.HandlerFunc(srv.FileHandler), cfg.APIToken, log)
 
 	httpSrv := &http.Server{Addr: cfg.ListenAddr, Handler: mux}
 	go func() {
@@ -120,9 +143,78 @@ func main() {
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 	<-stop
 	log.Info("shutting down")
+
+	// Stop both producers of notifications — the scheduler and the API — before
+	// draining, so the flush below is not racing fresh pins. monCancel is also
+	// deferred; cancelling twice is harmless.
+	monCancel()
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_ = httpSrv.Shutdown(shutdownCtx)
+
+	// Flush pending debounced notifications and let in-flight deliveries finish
+	// before the mount goes away, so a pin that landed inside the debounce
+	// window still reaches the media server (and still resolves on disk when it
+	// scans). Bounded well inside a typical 10s container stop grace period.
+	flushCtx, flushCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer flushCancel()
+	notifier.Close(flushCtx)
+}
+
+// newMux builds wisp's route table. An empty token leaves every route open,
+// which is the pre-1.5 behavior and the default.
+//
+// The split is between wisp's control plane and everything a credential-less
+// consumer must still reach:
+//
+//   - Protected: every mutating endpoint (a caller who reaches them can delete
+//     the whole library), and every read endpoint that discloses what the user
+//     has or has asked for — pins, monitors, the schedule, request status. Read
+//     -only is not the same as harmless: the pin list *is* the library. /metrics
+//     and /api/status join them; they leak only counts and version, but nothing
+//     credential-less consumes them (Prometheus sends bearer tokens natively via
+//     `authorization:` in a scrape config), so there is no cost to closing them.
+//
+//   - Public: the two health probes. A Docker healthcheck runs
+//     `wget --spider` with no way to attach a header, so gating these would wedge
+//     `depends_on: {condition: service_healthy}` for every dependent container.
+//     Their bodies carry only a status string and two booleans — no paths, URLs,
+//     or tokens — so nothing is disclosed by leaving them open.
+//
+//   - Public: file serving. This is the data plane the FUSE mount reads
+//     through, and it cannot be closed without breaking mounts. rclone's http
+//     backend would need the token threaded into its connection string, where it
+//     risks surfacing in rclone's own logs and error messages, and every
+//     deployment that mounts with an *external* rclone (a documented, supported
+//     mode wisp cannot reach into) would break the moment an operator set the
+//     token. Directory listings therefore still expose the library tree; that is
+//     stated plainly in the docs, because a security control that is half-true is
+//     worse than one whose limits are known.
+func newMux(a *app, fileHandler http.Handler, token string, log *slog.Logger) *http.ServeMux {
+	mux := http.NewServeMux()
+	auth := requireBearer(token, log)
+	protected := func(pattern string, h http.HandlerFunc) { mux.Handle(pattern, auth(h)) }
+
+	protected("POST /api/add", a.handleAdd)
+	protected("GET /api/pins", a.handleListPins)
+	protected("DELETE /api/pins", a.handleDeletePin)
+	protected("POST /api/monitors", a.handleCreateMonitor)
+	protected("GET /api/monitors", a.handleListMonitors)
+	protected("DELETE /api/monitors", a.handleDeleteMonitor)
+	protected("POST /api/monitors/refresh", a.handleRefreshMonitors)
+	protected("GET /api/schedule", a.handleSchedule)
+	protected("GET /api/requests/status", a.handleRequestStatus)
+	protected("GET /api/status", a.handleStatus)
+	protected("GET /metrics", a.handleMetrics)
+
+	// Public — see the doc comment above before moving anything below this line.
+	mux.HandleFunc("GET /api/health", a.handleHealth)
+	mux.HandleFunc("GET /api/healthz", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, "ok")
+	})
+	mux.Handle("/", fileHandler)
+	return mux
 }
 
 // parseLevel maps a config string to a slog level, defaulting to info.
@@ -147,7 +239,7 @@ func portOf(addr string) string {
 	return ":8080"
 }
 
-const version = "1.2.0" // x-release-please-version
+const version = "1.6.0" // x-release-please-version
 
 type app struct {
 	store     *store.Store
@@ -159,10 +251,17 @@ type app struct {
 	mon       *monitor.Monitor
 	prober    *prober
 	startedAt time.Time
+	// quality is the tier policy enforced on every intake path, so a tier the
+	// operator disallowed is never stored on a monitor and never scraped.
+	quality library.QualityPolicy
+
 	// pinMu serializes the store-mutation half of pin() (list → upsert → delete
 	// of superseded pins) so concurrent pins — API and scheduler — can't clobber
 	// each other. The network resolve runs outside it.
 	pinMu sync.Mutex
+	// mountHealthyOverride stubs the FUSE mount probe, which is otherwise
+	// unreachable without a real mount. Only tests set it.
+	mountHealthyOverride func() bool
 }
 
 type addRequest struct {
@@ -247,9 +346,16 @@ func (a *app) handleAdd(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "imdb_id and title are required", http.StatusBadRequest)
 		return
 	}
+	// The policy applies here too, or "4K is off" would leak: a direct pin scrapes
+	// and stores a 2160p file just as a monitor would.
+	quality, err := a.quality.ApplyOne(req.Quality)
+	if err != nil {
+		writeQualityPolicyError(w, a.log, req.MediaType, req.IMDbID, []string{req.Quality}, a.quality)
+		return
+	}
 	vpath, size, err := a.pin(r.Context(), pinSpec{
 		MediaType: req.MediaType, IMDbID: req.IMDbID, TMDbID: req.TMDbID, TVDbID: req.TVDbID,
-		Title: req.Title, Year: req.Year, Season: req.Season, Episode: req.Episode, Quality: req.Quality,
+		Title: req.Title, Year: req.Year, Season: req.Season, Episode: req.Episode, Quality: quality,
 	})
 	if err != nil {
 		writeAddError(w, a.log, req, err)
@@ -268,9 +374,15 @@ func (a *app) handleAddRequest(w http.ResponseWriter, r *http.Request, req addRe
 		http.Error(w, "imdb_id or tmdb_id is required", http.StatusBadRequest)
 		return
 	}
+	requested := req.qualities()
+	qualities, err := a.quality.Apply(requested)
+	if err != nil {
+		writeQualityPolicyError(w, a.log, req.MediaType, firstNonEmpty(req.IMDbID, req.TMDbID), requested, a.quality)
+		return
+	}
 	if err := a.mon.Intake(r.Context(), monitor.Request{
 		MediaType: req.MediaType, IMDbID: req.IMDbID, TMDbID: req.TMDbID, TVDbID: req.TVDbID,
-		Title: req.Title, Year: req.Year, Qualities: req.qualities(),
+		Title: req.Title, Year: req.Year, Qualities: qualities,
 		IsAnime: req.IsAnime, RequestRef: req.RequestRef,
 	}); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -480,6 +592,21 @@ func (a *app) deletePin(ctx context.Context, path string) (bool, error) {
 	return true, nil
 }
 
+// handleHealth reports process readiness.
+//
+// Deliberately shallow. It touches no network dependency (AIOStreams, TMDb),
+// because an upstream outage must not mark wisp unhealthy — placeholders keep
+// resolving as soon as the provider recovers, and a restart would not help. It
+// also avoids a store read: bbolt's Stats() walks the bucket's pages, which is
+// not worth repeating every 10s for the life of the process.
+//
+// Before placeholders this endpoint gated on the FUSE mount being live, so a
+// media server could not start scanning an empty mountpoint. There is no mount
+// now, and no equivalent failure to gate on.
+func (a *app) handleHealth(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, map[string]any{"status": "ok"})
+}
+
 func (a *app) handleStatus(w http.ResponseWriter, r *http.Request) {
 	count, _ := a.store.Count(r.Context())
 	monitors, _ := a.store.CountMonitored(r.Context())
@@ -513,6 +640,48 @@ func (a *app) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	metric("wisp_link_cache_entries", "Cached CDN URLs currently held.", "gauge", int64(m.LinkCacheSize))
 	if a.prober != nil {
 		writeProbeMetrics(w, a.prober)
+	}
+	// Delivery counters live on the concrete notifier. Tests swap in their own
+	// Notifier implementation, which simply has no counters to report.
+	if n, ok := a.webhook.(notifyMetricsSource); ok {
+		writeNotifyMetrics(w, n.Metrics())
+	}
+}
+
+// notifyMetricsSource is the slice of *notify.Multi that /metrics needs. Naming
+// it here rather than widening notify.Notifier keeps delivery and observability
+// separate: a fake notifier in a test stays a three-method fake.
+type notifyMetricsSource interface {
+	Metrics() []notify.TargetMetrics
+}
+
+// writeNotifyMetrics renders per-target media-server delivery outcomes.
+//
+// These exist to answer one question with evidence: how often does wisp's
+// best-effort, never-retried notification actually fail to land? The split is
+// per target because the consumers fail for different reasons — knowing the
+// aggregate rate would not tell an operator which media server to look at.
+//
+// The help strings are deliberately careful about what a success means. wisp
+// can only observe the HTTP exchange, so "delivered" means the consumer
+// returned 2xx — it does not mean the consumer scanned anything. Silo answers
+// 202 to an ARR webhook it may then discard, and media servers coalesce rapid
+// rescan requests. A healthy success rate here is necessary, not sufficient.
+func writeNotifyMetrics(w http.ResponseWriter, targets []notify.TargetMetrics) {
+	if len(targets) == 0 {
+		return
+	}
+	fmt.Fprint(w, "# HELP wisp_notify_deliveries_total Media-server notification attempts by target and outcome. One count per outbound HTTP request, not per file: a coalesced import batch is a single attempt covering many files. result=\"success\" means the consumer answered 2xx, i.e. it accepted the notification — NOT that it rescanned anything (Silo returns 202 and may still discard the event). result=\"failure\" means a transport error or a non-2xx response; nothing retries these, so the event is lost.\n")
+	fmt.Fprint(w, "# TYPE wisp_notify_deliveries_total counter\n")
+	for _, t := range targets {
+		fmt.Fprintf(w, "wisp_notify_deliveries_total{target=%q,result=%q} %d\n", t.Target, "success", t.Delivered)
+		fmt.Fprintf(w, "wisp_notify_deliveries_total{target=%q,result=%q} %d\n", t.Target, "failure", t.Failed)
+	}
+
+	fmt.Fprint(w, "# HELP wisp_notify_dropped_total Events discarded before any delivery was attempted, and so counted in neither result of wisp_notify_deliveries_total. Only the Plex target can drop this way today: no configured library section covers the changed folder, which is a silent loss caused by configuration rather than by the network.\n")
+	fmt.Fprint(w, "# TYPE wisp_notify_dropped_total counter\n")
+	for _, t := range targets {
+		fmt.Fprintf(w, "wisp_notify_dropped_total{target=%q} %d\n", t.Target, t.Dropped)
 	}
 }
 
@@ -549,6 +718,35 @@ func writeJSON(w http.ResponseWriter, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
+// writeCodedError writes the same structured `{error, message}` body writeAddError
+// uses, so every machine-readable failure on the intake paths has one shape.
+func writeCodedError(w http.ResponseWriter, status int, code, message string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]any{"error": code, "message": message})
+}
+
+// errCodeQualityNotAllowed is returned when a request names no quality tier the
+// configured policy permits — in practice a 2160p-only request while
+// WISP_ALLOW_2160P is off.
+//
+// It is deliberately a 4xx with no Retry-After, unlike every code writeAddError
+// emits: those describe upstream conditions (no streams yet, rate limiting, an
+// AIOStreams fault) that a feeder should keep polling through, and they are 5xx
+// or 429 for exactly that reason. This one is a permanent, local, policy
+// rejection — retrying it will never succeed — so a caller following the ordinary
+// "4xx = give up, 5xx/429 = retry" rule marks the request failed and closes it.
+const errCodeQualityNotAllowed = "quality_not_allowed"
+
+// writeQualityPolicyError rejects an intake whose every tier is disallowed.
+func writeQualityPolicyError(w http.ResponseWriter, log *slog.Logger, mediaType, id string, requested []string, policy library.QualityPolicy) {
+	msg := "no requested quality tier is allowed: 2160p is disabled (set WISP_ALLOW_2160P=true to enable 4K)"
+	log.Warn("intake rejected by quality policy", "code", errCodeQualityNotAllowed,
+		"media_type", mediaType, "id", id, "requested", requested,
+		"min_quality", policy.Min, "allow_2160p", policy.Allow2160p)
+	writeCodedError(w, http.StatusUnprocessableEntity, errCodeQualityNotAllowed, msg)
+}
+
 // Classified resolve outcomes. These map to distinct API responses in
 // writeAddError so feeders can tell a genuine no-stream condition from a
 // configuration/throttling problem (see aiostreams.SearchError for upstream
@@ -563,10 +761,19 @@ var (
 // keeps the pin's quality tier so a self-heal doesn't swap 4K for 1080p under a
 // file named [2160p]; if that tier has vanished it falls back to the best
 // available so playback still survives.
+//
+// It has one caller: the dead-link self-heal in the file server. The search
+// always bypasses the AIOStreams cache — the pin's stored link is known bad, so
+// a cached result set is exactly what must not be reused.
+//
+// A self-heal deliberately notifies nothing. The virtual path and the entry the
+// media server already holds are unchanged, so an import webhook would be pure
+// noise, and a flaky upstream can self-heal repeatedly within a single playback.
 func (a *app) reResolve(ctx context.Context, p *store.Pin) error {
-	sourceURL, size, _, _, err := a.resolve(ctx, p.MediaType, p.IMDbID, p.Season, p.Episode, library.NormalizeQuality(p.Quality), true)
+	const fresh = true
+	sourceURL, size, _, _, err := a.resolve(ctx, p.MediaType, p.IMDbID, p.Season, p.Episode, library.NormalizeQuality(p.Quality), fresh)
 	if errors.Is(err, errNoQualityMatch) {
-		sourceURL, size, _, _, err = a.resolve(ctx, p.MediaType, p.IMDbID, p.Season, p.Episode, "", true)
+		sourceURL, size, _, _, err = a.resolve(ctx, p.MediaType, p.IMDbID, p.Season, p.Episode, "", fresh)
 	}
 	if err != nil {
 		return err

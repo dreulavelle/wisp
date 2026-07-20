@@ -28,6 +28,7 @@ func testApp(t *testing.T) *app {
 		store: st, log: log, startedAt: time.Now(),
 		meta:    metadata.New("", nil),
 		webhook: notify.New(notify.Options{}, log),
+		quality: allowAllQualities,
 	}
 	a.mon = monitor.New(st, a.meta, a, time.Hour, 4, 7*24*time.Hour, log) // Run not started → Intake only records
 	return a
@@ -68,3 +69,25 @@ func TestMonitorCRUD(t *testing.T) {
 		t.Fatalf("monitors after delete = %d", n)
 	}
 }
+
+// recordingNotifier captures Import and Rename calls; Delete is a no-op. Unlike
+// the real notifier it delivers synchronously, so a test never races the fanout.
+// A nil channel means the test doesn't care about that event.
+type recordingNotifier struct {
+	imports chan [2]string
+	renames chan [2]string
+}
+
+func (n recordingNotifier) Import(_ context.Context, mediaType, virtualPath string) {
+	select {
+	case n.imports <- [2]string{mediaType, virtualPath}:
+	default:
+	}
+}
+func (n recordingNotifier) Rename(_ context.Context, _, previousPath, newPath string) {
+	select {
+	case n.renames <- [2]string{previousPath, newPath}:
+	default:
+	}
+}
+func (n recordingNotifier) Delete(context.Context, string, string) {}

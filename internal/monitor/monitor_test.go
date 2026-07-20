@@ -505,6 +505,90 @@ func movieItem(imdb, tmdb string, qualities ...string) store.Monitored {
 	}
 }
 
+// TierExhausted fires only once the exponential ramp has saturated at the cap —
+// the terminal state of a backoff that never permanently gives up. Below that,
+// the tier is still being retried on a meaningful schedule and must not be
+// treated as abandoned.
+func TestTierExhausted(t *testing.T) {
+	ful := newFakeFul()
+	m, _ := testMonitor(t, movieReleaseMux("500"), ful, date("2026-06-01T00:00:00Z"))
+	m.tierBackoffMax = 8 * time.Hour // interval = 1h → ramp 1h, 2h, 4h, 8h(cap)
+
+	cases := []struct {
+		misses int
+		want   bool
+	}{
+		{misses: 0, want: false}, // no evidence at all
+		{misses: 1, want: false}, // 1h — a single unanimous miss
+		{misses: 2, want: false}, // 2h
+		{misses: 3, want: false}, // 4h
+		{misses: 4, want: true},  // 8h — saturated
+		{misses: 9, want: true},  // still saturated
+	}
+	for _, tc := range cases {
+		got := m.TierExhausted(store.TierBackoffState{Misses: tc.misses})
+		if got != tc.want {
+			t.Fatalf("TierExhausted(misses=%d) = %v, want %v", tc.misses, got, tc.want)
+		}
+	}
+	// NextTry is deliberately irrelevant — inside or past its window, a saturated
+	// tier is equally absent, and keying off it would flap the status API.
+	inWindow := store.TierBackoffState{Misses: 4, NextTry: date("2027-01-01T00:00:00Z")}
+	if !m.TierExhausted(inWindow) {
+		t.Fatal("a saturated tier must stay exhausted while inside its backoff window")
+	}
+}
+
+// A pass records which requested tier each unpinned episode is waiting on, so the
+// status API can tell "10 episodes missing 2160p" from "10 episodes missing
+// everything". The default ("") tier is never tracked.
+func TestSeriesRecordsPendingByTier(t *testing.T) {
+	ctx := context.Background()
+	ful := newFakeFul()
+	ful.noQuality["2160p"] = true     // no 4K rips exist for this title
+	ful.noStream[[2]int{1, 2}] = true // E2 has no stream at any tier yet
+	now := date("2026-06-01T00:00:00Z")
+	m, _ := testMonitor(t, seriesEpisodesMux("tt42", 3), ful, now)
+
+	res := m.processSeries(ctx, seriesItem("tt42", "1080p", "2160p"), false)
+
+	// 3 episodes × 2160p absent, plus E2's 1080p with no stream at all = 4 pending.
+	if res.pendingAired != 4 {
+		t.Fatalf("pendingAired = %d, want 4", res.pendingAired)
+	}
+	if got := res.pendingByTier["2160p"]; got != 3 {
+		t.Fatalf("pendingByTier[2160p] = %d, want 3", got)
+	}
+	if got := res.pendingByTier["1080p"]; got != 1 {
+		t.Fatalf("pendingByTier[1080p] = %d, want 1", got)
+	}
+}
+
+// A metadata failure is not evidence that a series caught up: the previous
+// pending counts must survive the pass, or the status API would briefly report a
+// half-pinned series as completed.
+func TestSeriesEnumerateErrorKeepsPendingCounts(t *testing.T) {
+	ctx := context.Background()
+	now := date("2026-06-01T00:00:00Z")
+	// A mux with no /meta/series route → enumeration fails.
+	m, _ := testMonitor(t, http.NewServeMux(), newFakeFul(), now)
+
+	it := seriesItem("tt43", "1080p", "2160p")
+	it.PendingAired = 7
+	it.PendingByTier = map[string]int{"2160p": 7}
+
+	res := m.processSeries(ctx, it, false)
+	if res.errMsg == "" {
+		t.Fatal("expected an enumeration error")
+	}
+	if res.pendingAired != 7 {
+		t.Fatalf("pendingAired = %d, want the previous 7 carried forward", res.pendingAired)
+	}
+	if got := res.pendingByTier["2160p"]; got != 7 {
+		t.Fatalf("pendingByTier[2160p] = %d, want the previous 7 carried forward", got)
+	}
+}
+
 // A tier that consistently returns NoQualityMatch (results exist, but not at this
 // resolution) accrues misses and its NextTry backs off exponentially from the base
 // interval, capped at tierBackoffMax; a successful pin of that tier resets it.

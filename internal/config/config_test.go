@@ -127,6 +127,66 @@ func TestLoadProbeDefaultsAndClamps(t *testing.T) {
 	}
 }
 
+// Notifications configured without any mount path must keep starting — the
+// notifier's /mnt/wisp default carries the deployment — but Load has to flag it
+// so main can emit the deprecation warning.
+func TestLoadDefaultsNotificationMountPath(t *testing.T) {
+	t.Setenv("WISP_AIOSTREAMS_URL", "https://host/stremio/uuid/blob/manifest.json")
+	t.Setenv("WISP_NOTIFY_ARR_WEBHOOK_URL", "https://silo/autoscan")
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("notifications without a mount path must not fail: %v", err)
+	}
+	if c.NotifyMountPath != "" {
+		t.Fatalf("NotifyMountPath = %q, want empty so notify applies its default", c.NotifyMountPath)
+	}
+	if !c.NotifyMountPathDefaulted {
+		t.Fatal("NotifyMountPathDefaulted = false, want true so the caller warns")
+	}
+
+	// An explicit value is honoured verbatim and must not be flagged.
+	t.Setenv("WISP_NOTIFY_MOUNT_PATH", "/silo/visible/wisp")
+	c, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.NotifyMountPath != "/silo/visible/wisp" {
+		t.Fatalf("NotifyMountPath = %q", c.NotifyMountPath)
+	}
+	if c.NotifyMountPathDefaulted {
+		t.Fatal("NotifyMountPathDefaulted = true for an explicitly configured path")
+	}
+}
+
+// With no notification targets there is nothing to warn about, however the
+// mount paths are configured.
+func TestLoadDoesNotFlagMountPathWithoutNotifyTargets(t *testing.T) {
+	t.Setenv("WISP_AIOSTREAMS_URL", "https://host/stremio/uuid/blob/manifest.json")
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.NotifyMountPathDefaulted {
+		t.Fatal("NotifyMountPathDefaulted = true with no notification targets configured")
+	}
+}
+
+func TestLoadUsesExplicitSelfMountForNotifications(t *testing.T) {
+	t.Setenv("WISP_AIOSTREAMS_URL", "https://host/stremio/uuid/blob/manifest.json")
+	t.Setenv("WISP_NOTIFY_ARR_WEBHOOK_URL", "https://silo/autoscan")
+	t.Setenv("WISP_MOUNT_PATH", "/configured/wisp")
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.NotifyMountPath != "/configured/wisp" {
+		t.Fatalf("NotifyMountPath = %q", c.NotifyMountPath)
+	}
+	if c.NotifyMountPathDefaulted {
+		t.Fatal("NotifyMountPathDefaulted = true when WISP_MOUNT_PATH supplied the path")
+	}
+}
+
 func TestListEnv(t *testing.T) {
 	t.Setenv("WISP_TEST_LIST", " us , gb ,, jp ")
 	got := listEnv("WISP_TEST_LIST", []string{"X"})
@@ -136,5 +196,145 @@ func TestListEnv(t *testing.T) {
 	t.Setenv("WISP_TEST_LIST", "")
 	if got := listEnv("WISP_TEST_LIST", []string{"X"}); len(got) != 1 || got[0] != "X" {
 		t.Fatalf("fallback = %v", got)
+	}
+}
+
+func TestLoadNotifyDebounce(t *testing.T) {
+	t.Setenv("WISP_AIOSTREAMS_URL", "https://host/stremio/uuid/blob/manifest.json")
+
+	// Unset: coalescing is on by default.
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.NotifyDebounce != 5*time.Second {
+		t.Fatalf("default debounce = %v, want 5s", c.NotifyDebounce)
+	}
+
+	for _, tc := range []struct {
+		in   string
+		want time.Duration
+	}{
+		{"10s", 10 * time.Second},
+		{"0", 0},                     // explicit zero disables — the escape hatch
+		{"0s", 0},                    // ...in either spelling
+		{"1ms", time.Second},         // clamped up
+		{"10m", time.Minute},         // clamped down
+		{"garbage", 5 * time.Second}, // unparseable falls back
+		{"-5s", 5 * time.Second},     // negative falls back
+	} {
+		t.Setenv("WISP_NOTIFY_DEBOUNCE", tc.in)
+		c, err := Load()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c.NotifyDebounce != tc.want {
+			t.Errorf("debounce(%q) = %v, want %v", tc.in, c.NotifyDebounce, tc.want)
+		}
+	}
+}
+
+// Lazy resolution was removed, but WISP_LAZY_RESOLUTION stays accepted so a
+// deployment that sets it still starts. Load only records that it was asked
+// for, so main can warn that it does nothing.
+func TestLoadAcceptsRemovedLazyResolution(t *testing.T) {
+	t.Setenv("WISP_AIOSTREAMS_URL", "https://host/stremio/uuid/blob/manifest.json")
+
+	for _, tc := range []struct {
+		name string
+		set  bool
+		val  string
+		want bool
+	}{
+		{name: "unset", want: false},
+		{name: "false", set: true, val: "false", want: false},
+		{name: "garbage", set: true, val: "banana", want: false},
+		{name: "true", set: true, val: "true", want: true},
+		{name: "1", set: true, val: "1", want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.set {
+				t.Setenv("WISP_LAZY_RESOLUTION", tc.val)
+			}
+			c, err := Load()
+			if err != nil {
+				t.Fatalf("WISP_LAZY_RESOLUTION=%q must not fail startup: %v", tc.val, err)
+			}
+			if c.LazyResolutionRequested != tc.want {
+				t.Fatalf("LazyResolutionRequested = %v, want %v", c.LazyResolutionRequested, tc.want)
+			}
+		})
+	}
+}
+
+// The API token is optional and off by default: an unset — or whitespace-only —
+// value must leave APIToken empty, which is what disables authentication and
+// keeps existing unauthenticated deployments working across an upgrade.
+func TestLoadAPIToken(t *testing.T) {
+	t.Setenv("WISP_AIOSTREAMS_URL", "https://host/stremio/uuid/blob/manifest.json")
+
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.APIToken != "" {
+		t.Fatalf("APIToken = %q, want empty by default (auth off)", c.APIToken)
+	}
+
+	t.Setenv("WISP_API_TOKEN", "   ")
+	if c, err = Load(); err != nil {
+		t.Fatal(err)
+	} else if c.APIToken != "" {
+		t.Fatalf("APIToken = %q, want empty — a whitespace-only value is not a token", c.APIToken)
+	}
+
+	t.Setenv("WISP_API_TOKEN", "  s3cret  ")
+	if c, err = Load(); err != nil {
+		t.Fatal(err)
+	} else if c.APIToken != "s3cret" {
+		t.Fatalf("APIToken = %q, want %q (trimmed)", c.APIToken, "s3cret")
+	}
+}
+
+// The shipped defaults are a 1080p floor with 4K OFF: an operator who sets
+// nothing must not have wisp requesting or scraping 2160p.
+func TestLoadQualityPolicyDefaults(t *testing.T) {
+	t.Setenv("WISP_AIOSTREAMS_URL", "https://host/stremio/uuid/blob/manifest.json")
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.MinQuality != "1080p" {
+		t.Fatalf("MinQuality = %q, want 1080p", c.MinQuality)
+	}
+	if c.Allow2160p {
+		t.Fatal("Allow2160p defaults to true; 4K must be opt-in")
+	}
+	p := c.QualityPolicy()
+	if p.Min != "1080p" || p.Allow2160p {
+		t.Fatalf("QualityPolicy() = %#v, want {Min:1080p Allow2160p:false}", p)
+	}
+}
+
+// Both settings are overridable, and the tier label is canonicalized; garbage
+// falls back to the default rather than disabling the floor.
+func TestLoadQualityPolicyOverrides(t *testing.T) {
+	t.Setenv("WISP_AIOSTREAMS_URL", "https://host/stremio/uuid/blob/manifest.json")
+
+	t.Setenv("WISP_MIN_QUALITY", "720P")
+	t.Setenv("WISP_ALLOW_2160P", "true")
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.MinQuality != "720p" || !c.Allow2160p {
+		t.Fatalf("overrides = (%q, %v), want (720p, true)", c.MinQuality, c.Allow2160p)
+	}
+
+	t.Setenv("WISP_MIN_QUALITY", "potato")
+	if c, err = Load(); err != nil {
+		t.Fatal(err)
+	} else if c.MinQuality != "1080p" {
+		t.Fatalf("unparseable MinQuality = %q, want the 1080p fallback", c.MinQuality)
 	}
 }

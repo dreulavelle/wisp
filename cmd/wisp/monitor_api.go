@@ -40,7 +40,7 @@ func (a *app) Pin(ctx context.Context, t monitor.Target) (monitor.PinOutcome, er
 // pinOutcome classifies an "unable to pin yet" error into a monitor.PinOutcome and
 // a human-readable reason for logging. A genuine fault (auth/rate-limit/store)
 // yields reason == "" so the caller propagates it as an error instead of a benign
-// retry; its returned outcome is a placeholder never consumed while err != nil.
+// retry; its returned outcome is a stand-in never consumed while err != nil.
 func pinOutcome(err error) (monitor.PinOutcome, string) {
 	switch {
 	case errors.Is(err, errNoResults):
@@ -94,9 +94,14 @@ func (a *app) handleCreateMonitor(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "imdb_id or tmdb_id is required", http.StatusBadRequest)
 		return
 	}
+	qualities, err := a.quality.Apply(req.Qualities)
+	if err != nil {
+		writeQualityPolicyError(w, a.log, req.MediaType, firstNonEmpty(req.IMDbID, req.TMDbID), req.Qualities, a.quality)
+		return
+	}
 	if err := a.mon.Intake(r.Context(), monitor.Request{
 		MediaType: req.MediaType, IMDbID: req.IMDbID, TMDbID: req.TMDbID, TVDbID: req.TVDbID,
-		Title: req.Title, Year: req.Year, Qualities: normalizeQualities(req.Qualities), Seasons: req.Seasons,
+		Title: req.Title, Year: req.Year, Qualities: qualities, Seasons: req.Seasons,
 	}); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -140,14 +145,13 @@ func (a *app) handleRefreshMonitors(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"refreshing": true})
 }
 
-func normalizeQualities(in []string) []string {
-	var out []string
-	seen := map[string]bool{}
-	for _, q := range in {
-		if n := library.NormalizeQuality(q); n != "" && !seen[n] {
-			seen[n] = true
-			out = append(out, n)
+// firstNonEmpty returns the first non-empty argument, for logging a title by
+// whichever id the caller supplied.
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if v != "" {
+			return v
 		}
 	}
-	return out
+	return ""
 }
