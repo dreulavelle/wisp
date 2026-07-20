@@ -30,6 +30,7 @@ type Intake struct {
 	writer   *Writer
 	library  *Library
 	episodes EpisodeLister
+	identity IdentityResolver
 	log      *slog.Logger
 }
 
@@ -39,6 +40,13 @@ func NewIntake(writer *Writer, library *Library, episodes EpisodeLister, log *sl
 		log = slog.New(slog.DiscardHandler)
 	}
 	return &Intake{writer: writer, library: library, episodes: episodes, log: log}
+}
+
+// WithIdentityResolver enables deriving a missing canonical id from the IMDb id
+// the host did supply, so a request without a TVDB id is not simply refused.
+func (i *Intake) WithIdentityResolver(r IdentityResolver) *Intake {
+	i.identity = r
+	return i
 }
 
 // identityFrom extracts the canonical identity and lookup key from the ids Silo
@@ -83,7 +91,7 @@ func (i *Intake) Fulfill(ctx context.Context, req *pluginv1.FulfillRequest) (*pl
 	desc := req.GetRequest()
 	mediaType := strings.ToLower(strings.TrimSpace(desc.GetMediaType()))
 
-	id, imdb, err := identityFrom(mediaType, desc.GetExternalIds())
+	id, imdb, err := resolveIdentity(ctx, mediaType, desc.GetExternalIds(), i.identity)
 	if err != nil {
 		i.log.Warn("intake: rejecting request", "title", desc.GetTitle(), "error", err)
 		return &pluginv1.FulfillResponse{Message: err.Error()}, nil

@@ -21,6 +21,7 @@ import (
 	"github.com/Silo-Server/silo-plugin-sdk/pkg/pluginsdk/runtimedefault"
 
 	"github.com/dreulavelle/wisp/internal/aiostreams"
+	"github.com/dreulavelle/wisp/internal/metadata"
 	"github.com/dreulavelle/wisp/internal/plugin"
 )
 
@@ -107,7 +108,11 @@ func (s *runtimeServer) Configure(_ context.Context, req *pluginv1.ConfigureRequ
 	// intake is wired here rather than at startup.
 	if next.libraryPath != "" {
 		writer := plugin.NewWriter(next.libraryPath, s.resolverBase(), plugin.NewSigner(next.aioURL, next.aioPassword))
-		s.router.SetIntake(plugin.NewIntake(writer, s.library, nil, s.log))
+		// Episode numbering comes from Cinemeta, whose series data is
+		// TVDB-derived, so seasons and episodes line up with what media servers
+		// expect without needing a TVDB key of our own.
+		meta := plugin.NewMetadataAdapter(metadata.New("", nil))
+		s.router.SetIntake(plugin.NewIntake(writer, s.library, meta, s.log).WithIdentityResolver(meta))
 	} else {
 		s.log.Warn("configure: no library path set; requests cannot create placeholders")
 	}

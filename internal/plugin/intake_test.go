@@ -319,3 +319,95 @@ func TestFulfilledPlaceholdersAreResolvable(t *testing.T) {
 		t.Errorf("identity = %q, want tmdb:603", req.ID.String())
 	}
 }
+
+type stubIdentity struct {
+	tvdb, tmdb string
+	calls      int
+}
+
+func (s *stubIdentity) ProviderIDs(context.Context, string, string) (string, string) {
+	s.calls++
+	return s.tvdb, s.tmdb
+}
+
+// Silo does not always carry a TVDB id. Deriving it from the IMDb id it does
+// have keeps those requests working instead of refusing them.
+func TestFulfillDerivesMissingIdentity(t *testing.T) {
+	eps := &stubEpisodes{eps: []EpisodeRef{{1, 1}}}
+	in, lib, root := newIntake(t, eps)
+	resolver := &stubIdentity{tvdb: "121361"}
+	in.WithIdentityResolver(resolver)
+
+	resp, err := in.Fulfill(context.Background(), fulfillReq("series", "Game of Thrones", 2011,
+		map[string]string{"imdb": "tt0944947"}, "1080p"))
+	if err != nil {
+		t.Fatalf("Fulfill() error = %v", err)
+	}
+	if got := resp.GetTargets()[0].GetStatus(); got != "completed" {
+		t.Fatalf("status = %q, want completed after deriving the tvdb id: %s",
+			got, resp.GetTargets()[0].GetMessage())
+	}
+	if resolver.calls == 0 {
+		t.Error("identity resolver was never consulted")
+	}
+	if lib.Count() != 1 {
+		t.Errorf("wrote %d placeholders, want 1", lib.Count())
+	}
+	want := filepath.Join(root, "Shows", "Game of Thrones (2011) [tvdb-121361]", "Season 01",
+		"Game of Thrones (2011) S01E01 [1080p].strm")
+	if _, err := os.Stat(want); err != nil {
+		t.Errorf("placeholder not written at the derived identity: %s", want)
+	}
+}
+
+// Derivation costs a network call, so it must not happen when the host already
+// supplied the id.
+func TestFulfillSkipsDerivationWhenIdentityIsPresent(t *testing.T) {
+	in, _, _ := newIntake(t, nil)
+	resolver := &stubIdentity{tmdb: "999"}
+	in.WithIdentityResolver(resolver)
+
+	if _, err := in.Fulfill(context.Background(), fulfillReq("movie", "The Matrix", 1999,
+		map[string]string{"tmdb": "603", "imdb": "tt0133093"}, "1080p")); err != nil {
+		t.Fatal(err)
+	}
+	if resolver.calls != 0 {
+		t.Errorf("resolver called %d times despite the host supplying tmdb", resolver.calls)
+	}
+}
+
+// Nothing can be derived without an IMDb id, so the request must still fail
+// clearly rather than silently producing a broken placeholder.
+func TestFulfillDerivationNeedsAnImdbID(t *testing.T) {
+	in, lib, _ := newIntake(t, nil)
+	in.WithIdentityResolver(&stubIdentity{tmdb: "603"})
+
+	resp, err := in.Fulfill(context.Background(), fulfillReq("movie", "X", 2020,
+		map[string]string{}, "1080p"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.GetTargets()) != 0 || resp.GetMessage() == "" {
+		t.Errorf("expected rejection with a message, got %+v", resp)
+	}
+	if lib.Count() != 0 {
+		t.Error("wrote placeholders for an underivable request")
+	}
+}
+
+func TestFulfillReportsWhenDerivationFinsNothing(t *testing.T) {
+	in, _, _ := newIntake(t, nil)
+	in.WithIdentityResolver(&stubIdentity{}) // resolves to nothing
+
+	resp, err := in.Fulfill(context.Background(), fulfillReq("movie", "X", 2020,
+		map[string]string{"imdb": "tt1"}, "1080p"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.GetTargets()) != 0 {
+		t.Errorf("got %d targets, want 0", len(resp.GetTargets()))
+	}
+	if !strings.Contains(resp.GetMessage(), "derived") {
+		t.Errorf("message = %q, should say derivation was attempted", resp.GetMessage())
+	}
+}
