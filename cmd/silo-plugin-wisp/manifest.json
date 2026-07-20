@@ -18,41 +18,7 @@
       "type": "http_routes.v1",
       "id": "wisp",
       "displayName": "Wisp",
-      "description": "Resolves .strm placeholders to live streams at playback time, and serves Wisp's management UI.",
-      "configSchema": [
-        {
-          "key": "global",
-          "jsonSchema": "{\"type\":\"object\",\"properties\":{\"aiostreams_url\":{\"type\":\"string\",\"title\":\"AIOStreams URL\"},\"aiostreams_password\":{\"type\":\"string\",\"title\":\"AIOStreams Password\"},\"library_path\":{\"type\":\"string\",\"title\":\"Library Path\"}},\"required\":[\"aiostreams_url\",\"library_path\"]}",
-          "adminForm": {
-            "submitLabel": "Save Wisp settings",
-            "fields": [
-              {
-                "key": "aiostreams_url",
-                "label": "AIOStreams URL",
-                "control": "ADMIN_FORM_CONTROL_TEXT",
-                "required": true,
-                "description": "Full AIOStreams manifest URL, copied from its configure page. Example: https://aiostreams.example.com/stremio/<uuid>/manifest.json",
-                "placeholder": "https://aiostreams.example.com/stremio/<uuid>/manifest.json"
-              },
-              {
-                "key": "aiostreams_password",
-                "label": "AIOStreams Password",
-                "control": "ADMIN_FORM_CONTROL_PASSWORD",
-                "secret": true,
-                "description": "Password for the AIOStreams instance. Leave empty if it needs none."
-              },
-              {
-                "key": "library_path",
-                "label": "Library Path",
-                "control": "ADMIN_FORM_CONTROL_TEXT",
-                "required": true,
-                "description": "Directory where Wisp writes .strm placeholders. Silo must have a library pointed at this same path.",
-                "placeholder": "/library"
-              }
-            ]
-          }
-        }
-      ]
+      "description": "Resolves .strm placeholders to live streams at playback time, and serves Wisp's management UI."
     },
     {
       "type": "scan_source.v1",
@@ -65,6 +31,40 @@
       "id": "wisp-requests",
       "displayName": "Wisp",
       "description": "Turns a Silo request into a playable placeholder immediately, resolved on demand at playback."
+    }
+  ],
+  "globalConfigSchema": [
+    {
+      "key": "global",
+      "jsonSchema": "{\"type\":\"object\",\"properties\":{\"aiostreams_url\":{\"type\":\"string\",\"title\":\"AIOStreams URL\"},\"aiostreams_password\":{\"type\":\"string\",\"title\":\"AIOStreams Password\"},\"library_path\":{\"type\":\"string\",\"title\":\"Library Path\"}},\"required\":[\"aiostreams_url\",\"library_path\"]}",
+      "adminForm": {
+        "submitLabel": "Save Wisp settings",
+        "fields": [
+          {
+            "key": "aiostreams_url",
+            "label": "AIOStreams URL",
+            "control": "ADMIN_FORM_CONTROL_TEXT",
+            "required": true,
+            "description": "Full AIOStreams manifest URL, copied from its configure page. Example: https://aiostreams.example.com/stremio/<uuid>/manifest.json",
+            "placeholder": "https://aiostreams.example.com/stremio/<uuid>/manifest.json"
+          },
+          {
+            "key": "aiostreams_password",
+            "label": "AIOStreams Password",
+            "control": "ADMIN_FORM_CONTROL_PASSWORD",
+            "secret": true,
+            "description": "Password for the AIOStreams instance. Leave empty if it needs none."
+          },
+          {
+            "key": "library_path",
+            "label": "Library Path",
+            "control": "ADMIN_FORM_CONTROL_TEXT",
+            "required": true,
+            "description": "Directory where Wisp writes .strm placeholders. Silo must have a library pointed at this same path.",
+            "placeholder": "/library"
+          }
+        ]
+      }
     }
   ],
   "httpRoutes": [

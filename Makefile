@@ -1,7 +1,14 @@
 SHELL := /bin/bash
 
 PLUGIN      := silo-plugin-wisp
-VERSION     ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+
+# The manifest is the single source of truth for the plugin version.
+#
+# Silo refuses to run a plugin whose runtime manifest disagrees with the one in
+# the installed archive ("plugin runtime manifest does not match installed
+# manifest"), so a git-describe version stamped into the binary would make every
+# build uninstallable. Releases bump cmd/$(PLUGIN)/manifest.json.
+VERSION     ?= $(shell python3 -c 'import json;print(json.load(open("cmd/silo-plugin-wisp/manifest.json"))["version"])')
 DIST        := dist
 GOFLAGS     := -trimpath
 LDFLAGS     := -s -w -X main.version=$(VERSION)
@@ -25,16 +32,24 @@ dist:
 ## zip — installable archive for Silo's Admin -> Plugins -> Manual Install.
 ## Layout is flat: manifest.json plus a binary named `plugin` at the archive
 ## root, which is what the installer expects.
+## The installer verifies the binary against the checksum in the archive's
+## manifest and refuses the upload on a mismatch, so the checksum is stamped
+## here rather than left to the placeholder in the source manifest.
+##
 ## Uses python's zipfile rather than the zip(1) binary so packaging needs no
 ## system dependency beyond what building already requires.
 zip: dist
-	@python3 -c 'import zipfile,sys,os; \
+	@python3 -c 'import zipfile,json,hashlib,os; \
 		arch=os.popen("go env GOARCH").read().strip(); \
+		binary=open("$(DIST)/$(PLUGIN)-linux-"+arch,"rb").read(); \
+		manifest=json.load(open("cmd/$(PLUGIN)/manifest.json")); \
+		manifest["checksum"]=hashlib.sha256(binary).hexdigest(); \
 		z=zipfile.ZipFile("$(DIST)/$(PLUGIN).zip","w",zipfile.ZIP_DEFLATED); \
-		z.write("cmd/$(PLUGIN)/manifest.json","manifest.json"); \
+		z.writestr("manifest.json", json.dumps(manifest, indent=2)); \
 		info=zipfile.ZipInfo("plugin"); info.external_attr=0o755<<16; info.compress_type=zipfile.ZIP_DEFLATED; \
-		z.writestr(info, open("$(DIST)/$(PLUGIN)-linux-"+arch,"rb").read()); \
-		z.close()'
+		z.writestr(info, binary); \
+		z.close(); \
+		print("  checksum", manifest["checksum"][:16]+"...", "version", manifest["version"])'
 	@echo "packaged $(DIST)/$(PLUGIN).zip"
 
 test:
