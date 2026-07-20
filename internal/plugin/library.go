@@ -10,7 +10,8 @@ import (
 type Placeholder struct {
 	Path           string     `json:"path"`
 	MediaType      string     `json:"media_type"`
-	IMDbID         string     `json:"imdb_id"`
+	ID             MediaID    `json:"id"`
+	IMDbID         string     `json:"imdb_id,omitempty"`
 	Season         int        `json:"season,omitempty"`
 	Episode        int        `json:"episode,omitempty"`
 	Quality        string     `json:"quality,omitempty"`
@@ -44,6 +45,7 @@ func (l *Library) Add(p Placeholder) {
 
 	if existing, ok := l.items[p.Path]; ok {
 		existing.MediaType = p.MediaType
+		existing.ID = p.ID
 		existing.IMDbID = p.IMDbID
 		existing.Season, existing.Episode = p.Season, p.Episode
 		existing.Quality = p.Quality
@@ -57,13 +59,13 @@ func (l *Library) Add(p Placeholder) {
 }
 
 // MarkResolved records a successful play for a media key.
-func (l *Library) MarkResolved(imdbID string, season, episode int) {
+func (l *Library) MarkResolved(id MediaID, season, episode int) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
 	now := time.Now()
 	for _, p := range l.items {
-		if p.IMDbID == imdbID && p.Season == season && p.Episode == episode {
+		if p.ID == id && p.Season == season && p.Episode == episode {
 			p.LastResolvedAt = &now
 			p.LastError = ""
 			p.Plays++
@@ -72,12 +74,12 @@ func (l *Library) MarkResolved(imdbID string, season, episode int) {
 }
 
 // MarkFailed records a failed resolution for a media key.
-func (l *Library) MarkFailed(imdbID string, season, episode int, reason string) {
+func (l *Library) MarkFailed(id MediaID, season, episode int, reason string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
 	for _, p := range l.items {
-		if p.IMDbID == imdbID && p.Season == season && p.Episode == episode {
+		if p.ID == id && p.Season == season && p.Episode == episode {
 			p.LastError = reason
 		}
 	}

@@ -37,7 +37,8 @@ func TestHTTPRoutesPreservesRedirect(t *testing.T) {
 
 	resp, err := routes.Handle(context.Background(), &pluginv1.HandleHTTPRequest{
 		Method: http.MethodGet,
-		Path:   "/resolve/movie/tt0133093",
+		Path:   "/resolve/movie/tmdb:603",
+		Query:  mustStruct(map[string]any{"imdb": "tt0133093"}),
 	})
 	if err != nil {
 		t.Fatalf("Handle() error = %v", err)
@@ -62,13 +63,13 @@ func TestHTTPRoutesPassesQueryParameters(t *testing.T) {
 	}}
 	routes.SetHandler(NewRouter(NewResolver(stub), slog.New(slog.DiscardHandler)).Handler())
 
-	query, err := structpb.NewStruct(map[string]any{"quality": "2160p"})
+	query, err := structpb.NewStruct(map[string]any{"quality": "2160p", "imdb": "tt0133093"})
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	resp, err := routes.Handle(context.Background(), &pluginv1.HandleHTTPRequest{
-		Method: http.MethodGet, Path: "/resolve/movie/tt0133093", Query: query,
+		Method: http.MethodGet, Path: "/resolve/movie/tmdb:603", Query: query,
 	})
 	if err != nil {
 		t.Fatalf("Handle() error = %v", err)
@@ -124,7 +125,8 @@ func TestHTTPRoutesNoStreamIsRetryable(t *testing.T) {
 	routes.SetHandler(NewRouter(NewResolver(&stubSearcher{}), slog.New(slog.DiscardHandler)).Handler())
 
 	resp, err := routes.Handle(context.Background(), &pluginv1.HandleHTTPRequest{
-		Method: http.MethodGet, Path: "/resolve/movie/tt0133093",
+		Method: http.MethodGet, Path: "/resolve/movie/tmdb:603",
+		Query: mustStruct(map[string]any{"imdb": "tt0133093"}),
 	})
 	if err != nil {
 		t.Fatalf("Handle() error = %v", err)
@@ -139,7 +141,7 @@ func TestHTTPRoutesBadPath(t *testing.T) {
 	routes.SetHandler(NewRouter(NewResolver(&stubSearcher{}), slog.New(slog.DiscardHandler)).Handler())
 
 	resp, err := routes.Handle(context.Background(), &pluginv1.HandleHTTPRequest{
-		Method: http.MethodGet, Path: "/resolve/movie/not-an-imdb-id",
+		Method: http.MethodGet, Path: "/resolve/movie/not-an-id",
 	})
 	if err != nil {
 		t.Fatalf("Handle() error = %v", err)
@@ -159,7 +161,8 @@ func TestHTTPRoutesDoesNotLeakUpstreamDetail(t *testing.T) {
 	).Handler())
 
 	resp, err := routes.Handle(context.Background(), &pluginv1.HandleHTTPRequest{
-		Method: http.MethodGet, Path: "/resolve/movie/tt0133093",
+		Method: http.MethodGet, Path: "/resolve/movie/tmdb:603",
+		Query: mustStruct(map[string]any{"imdb": "tt0133093"}),
 	})
 	if err != nil {
 		t.Fatalf("Handle() error = %v", err)
@@ -184,4 +187,12 @@ func indexOf(h, n string) int {
 		}
 	}
 	return -1
+}
+
+func mustStruct(m map[string]any) *structpb.Struct {
+	s, err := structpb.NewStruct(m)
+	if err != nil {
+		panic(err)
+	}
+	return s
 }

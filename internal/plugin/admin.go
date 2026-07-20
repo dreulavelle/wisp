@@ -27,7 +27,7 @@ const maxActivity = 50
 type Activity struct {
 	At         time.Time `json:"at"`
 	Title      string    `json:"title,omitempty"`
-	IMDbID     string    `json:"imdb_id,omitempty"`
+	MediaID    string    `json:"media_id,omitempty"`
 	Quality    string    `json:"quality,omitempty"`
 	SearchMS   int64     `json:"search_ms"`
 	SelectMS   int64     `json:"select_ms"`

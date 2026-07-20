@@ -56,8 +56,12 @@ func NewSigner(seed ...string) *Signer {
 // 2160p fetch, which is a different amount of an operator's bandwidth and
 // debrid quota.
 func canonical(req ResolveRequest) string {
-	return fmt.Sprintf("%s|%s|%d|%d|%s",
+	// The IMDb lookup key is signed alongside the identity. It travels in the
+	// URL rather than being derived, so without covering it an attacker could
+	// keep a valid token and swap in any title they liked.
+	return fmt.Sprintf("%s|%s|%s|%d|%d|%s",
 		strings.ToLower(req.MediaType),
+		strings.ToLower(req.ID.String()),
 		strings.ToLower(req.IMDbID),
 		req.Season,
 		req.Episode,

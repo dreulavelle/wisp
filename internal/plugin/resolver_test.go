@@ -34,34 +34,34 @@ func TestParseResolvePath(t *testing.T) {
 		{
 			name: "movie",
 			path: "/resolve/movie/tt0133093",
-			want: ResolveRequest{MediaType: "movie", IMDbID: "tt0133093"},
+			want: ResolveRequest{MediaType: "movie", ID: MediaID{SourceIMDb, "tt0133093"}, IMDbID: "tt0133093"},
 		},
 		{
 			name: "series",
 			path: "/resolve/series/tt0944947/1/9",
-			want: ResolveRequest{MediaType: "series", IMDbID: "tt0944947", Season: 1, Episode: 9},
+			want: ResolveRequest{MediaType: "series", ID: MediaID{SourceIMDb, "tt0944947"}, IMDbID: "tt0944947", Season: 1, Episode: 9},
 		},
 		{
 			name: "double digit season and episode",
 			path: "/resolve/series/tt0944947/10/22",
-			want: ResolveRequest{MediaType: "series", IMDbID: "tt0944947", Season: 10, Episode: 22},
+			want: ResolveRequest{MediaType: "series", ID: MediaID{SourceIMDb, "tt0944947"}, IMDbID: "tt0944947", Season: 10, Episode: 22},
 		},
 		{
 			// Silo mounts plugin routes under a prefix whose depth we should
 			// not have to know.
 			name: "tolerates a mount prefix",
 			path: "/api/v1/plugins/20/resolve/movie/tt0133093",
-			want: ResolveRequest{MediaType: "movie", IMDbID: "tt0133093"},
+			want: ResolveRequest{MediaType: "movie", ID: MediaID{SourceIMDb, "tt0133093"}, IMDbID: "tt0133093"},
 		},
 		{
 			name: "no leading slash",
 			path: "resolve/movie/tt0133093",
-			want: ResolveRequest{MediaType: "movie", IMDbID: "tt0133093"},
+			want: ResolveRequest{MediaType: "movie", ID: MediaID{SourceIMDb, "tt0133093"}, IMDbID: "tt0133093"},
 		},
 		{
 			name: "special 0 season",
 			path: "/resolve/series/tt0944947/0/1",
-			want: ResolveRequest{MediaType: "series", IMDbID: "tt0944947", Season: 0, Episode: 1},
+			want: ResolveRequest{MediaType: "series", ID: MediaID{SourceIMDb, "tt0944947"}, IMDbID: "tt0944947", Season: 0, Episode: 1},
 		},
 	}
 
@@ -88,7 +88,6 @@ func TestParseResolvePathRejects(t *testing.T) {
 		"/resolve/series/tt0944947/x/9", // non-numeric season
 		"/resolve/series/tt0944947/1/y", // non-numeric episode
 		"/resolve/audiobook/tt0133093",  // unknown media type
-		"/resolve/movie/12345",          // tmdb id, not imdb
 		"/health",
 		"",
 	}
@@ -106,7 +105,7 @@ func TestResolvePicksRequestedQuality(t *testing.T) {
 	}}
 
 	got, err := NewResolver(stub).Resolve(context.Background(), ResolveRequest{
-		MediaType: "movie", IMDbID: "tt0133093", Quality: "2160p",
+		MediaType: "movie", ID: MediaID{SourceTMDB, "603"}, IMDbID: "tt0133093", Quality: "2160p",
 	})
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
@@ -124,7 +123,7 @@ func TestResolveFallsBackWhenTierMissing(t *testing.T) {
 	}}
 
 	got, err := NewResolver(stub).Resolve(context.Background(), ResolveRequest{
-		MediaType: "movie", IMDbID: "tt0133093", Quality: "2160p",
+		MediaType: "movie", ID: MediaID{SourceTMDB, "603"}, IMDbID: "tt0133093", Quality: "2160p",
 	})
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
@@ -143,7 +142,7 @@ func TestResolveHonoursAddonOrderingWithinATier(t *testing.T) {
 	}}
 
 	got, err := NewResolver(stub).Resolve(context.Background(), ResolveRequest{
-		MediaType: "movie", IMDbID: "tt0133093", Quality: "1080p",
+		MediaType: "movie", ID: MediaID{SourceTMDB, "603"}, IMDbID: "tt0133093", Quality: "1080p",
 	})
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
@@ -160,7 +159,7 @@ func TestResolveNoQualityTakesFirstPlayable(t *testing.T) {
 	}}
 
 	got, err := NewResolver(stub).Resolve(context.Background(), ResolveRequest{
-		MediaType: "movie", IMDbID: "tt0133093",
+		MediaType: "movie", ID: MediaID{SourceTMDB, "603"}, IMDbID: "tt0133093",
 	})
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
@@ -177,7 +176,7 @@ func TestResolveSkipsEmptyURLsAtRequestedTier(t *testing.T) {
 	}}
 
 	got, err := NewResolver(stub).Resolve(context.Background(), ResolveRequest{
-		MediaType: "movie", IMDbID: "tt0133093", Quality: "1080p",
+		MediaType: "movie", ID: MediaID{SourceTMDB, "603"}, IMDbID: "tt0133093", Quality: "1080p",
 	})
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
@@ -194,7 +193,7 @@ func TestResolveNoPlayableCandidates(t *testing.T) {
 	}}
 
 	_, err := NewResolver(stub).Resolve(context.Background(), ResolveRequest{
-		MediaType: "movie", IMDbID: "tt0133093",
+		MediaType: "movie", ID: MediaID{SourceTMDB, "603"}, IMDbID: "tt0133093",
 	})
 	if !errors.Is(err, ErrNoMatch) {
 		t.Errorf("error = %v, want ErrNoMatch", err)
@@ -206,7 +205,7 @@ func TestResolvePropagatesSearchError(t *testing.T) {
 	stub := &stubSearcher{err: sentinel}
 
 	_, err := NewResolver(stub).Resolve(context.Background(), ResolveRequest{
-		MediaType: "movie", IMDbID: "tt0133093",
+		MediaType: "movie", ID: MediaID{SourceTMDB, "603"}, IMDbID: "tt0133093",
 	})
 	if !errors.Is(err, sentinel) {
 		t.Errorf("error = %v, want the underlying search error", err)
@@ -217,7 +216,7 @@ func TestResolvePassesEpisodeCoordinates(t *testing.T) {
 	stub := &stubSearcher{streams: []aiostreams.Stream{{URL: "https://cdn/a.mkv", Resolution: "1080p"}}}
 
 	_, err := NewResolver(stub).Resolve(context.Background(), ResolveRequest{
-		MediaType: "series", IMDbID: "tt0944947", Season: 3, Episode: 9,
+		MediaType: "series", ID: MediaID{SourceTVDB, "121361"}, IMDbID: "tt0944947", Season: 3, Episode: 9,
 	})
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)

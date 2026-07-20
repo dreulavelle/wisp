@@ -19,13 +19,13 @@ func TestWriteMoviePlaceholder(t *testing.T) {
 
 	path, err := w.Write(Item{
 		MediaType: "movie", Title: "The Matrix", Year: 1999,
-		IMDbID: "tt0133093", Quality: "2160p",
+		ID: MediaID{SourceTMDB, "603"}, IMDbID: "tt0133093", Quality: "2160p",
 	})
 	if err != nil {
 		t.Fatalf("Write() error = %v", err)
 	}
 
-	want := filepath.Join(root, "Movies", "The Matrix (1999)", "The Matrix (1999) [2160p].strm")
+	want := filepath.Join(root, "Movies", "The Matrix (1999) [tmdb-603]", "The Matrix (1999) [2160p].strm")
 	if path != want {
 		t.Errorf("path = %q, want %q", path, want)
 	}
@@ -35,7 +35,7 @@ func TestWriteMoviePlaceholder(t *testing.T) {
 		t.Fatalf("read placeholder: %v", err)
 	}
 	line := strings.TrimSpace(string(body))
-	if !strings.HasPrefix(line, "http://127.0.0.1:8080/api/v1/plugins/3/resolve/movie/tt0133093?") {
+	if !strings.HasPrefix(line, "http://127.0.0.1:8080/api/v1/plugins/3/resolve/movie/tmdb:603?") {
 		t.Errorf("content = %q, want a resolver URL", line)
 	}
 	if !strings.Contains(line, "quality=2160p") {
@@ -51,20 +51,20 @@ func TestWriteEpisodePlaceholder(t *testing.T) {
 
 	path, err := w.Write(Item{
 		MediaType: "series", Title: "Game of Thrones", Year: 2011,
-		IMDbID: "tt0944947", Season: 1, Episode: 9, Quality: "1080p",
+		ID: MediaID{SourceTVDB, "121361"}, IMDbID: "tt0944947", Season: 1, Episode: 9, Quality: "1080p",
 	})
 	if err != nil {
 		t.Fatalf("Write() error = %v", err)
 	}
 
-	want := filepath.Join(root, "Shows", "Game of Thrones (2011)", "Season 01",
+	want := filepath.Join(root, "Shows", "Game of Thrones (2011) [tvdb-121361]", "Season 01",
 		"Game of Thrones (2011) S01E09 [1080p].strm")
 	if path != want {
 		t.Errorf("path = %q\nwant %q", path, want)
 	}
 
 	body, _ := os.ReadFile(path)
-	if !strings.Contains(string(body), "/resolve/series/tt0944947/1/9?") {
+	if !strings.Contains(string(body), "/resolve/series/tvdb:121361/1/9?") {
 		t.Errorf("content = %q, want season and episode in the path", body)
 	}
 }
@@ -75,8 +75,8 @@ func TestWrittenPlaceholderIsSelfConsistent(t *testing.T) {
 	signer := NewSigner("seed")
 	w := NewWriter(t.TempDir(), "http://127.0.0.1:8080/api/v1/plugins/3", signer)
 
-	item := Item{MediaType: "series", Title: "Severance", IMDbID: "tt11280740",
-		Season: 2, Episode: 7, Quality: "1080p"}
+	item := Item{MediaType: "series", Title: "Severance", ID: MediaID{SourceTVDB, "371980"},
+		IMDbID: "tt11280740", Season: 2, Episode: 7, Quality: "1080p"}
 	path, err := w.Write(item)
 	if err != nil {
 		t.Fatalf("Write() error = %v", err)
@@ -93,6 +93,7 @@ func TestWrittenPlaceholderIsSelfConsistent(t *testing.T) {
 		t.Fatalf("written path does not parse as a resolver path: %v", err)
 	}
 	req.Quality = u.Query().Get("quality")
+	req.IMDbID = u.Query().Get("imdb")
 
 	if !signer.Verify(req, u.Query().Get("t")) {
 		t.Error("the token written into the placeholder does not verify against its own URL")
@@ -116,7 +117,7 @@ func TestWriteRejectsPathTraversal(t *testing.T) {
 
 	for _, title := range hostile {
 		t.Run(title, func(t *testing.T) {
-			path, err := w.Write(Item{MediaType: "movie", Title: title, IMDbID: "tt1"})
+			path, err := w.Write(Item{MediaType: "movie", Title: title, ID: MediaID{SourceTMDB, "1"}, IMDbID: "tt1"})
 			if err != nil {
 				return // rejected outright, which is fine
 			}
@@ -162,7 +163,7 @@ func TestSanitize(t *testing.T) {
 func TestWriteIsAtomic(t *testing.T) {
 	w, root := newTestWriter(t)
 
-	if _, err := w.Write(Item{MediaType: "movie", Title: "Atomic", Year: 2020, IMDbID: "tt1"}); err != nil {
+	if _, err := w.Write(Item{MediaType: "movie", Title: "Atomic", Year: 2020, ID: MediaID{SourceTMDB, "1"}, IMDbID: "tt1"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -181,7 +182,7 @@ func TestWriteIsAtomic(t *testing.T) {
 
 func TestWriteIsIdempotent(t *testing.T) {
 	w, _ := newTestWriter(t)
-	item := Item{MediaType: "movie", Title: "Dune", Year: 2021, IMDbID: "tt1160419", Quality: "2160p"}
+	item := Item{MediaType: "movie", Title: "Dune", Year: 2021, ID: MediaID{SourceTMDB, "438631"}, IMDbID: "tt1160419", Quality: "2160p"}
 
 	first, err := w.Write(item)
 	if err != nil {
@@ -205,7 +206,7 @@ func TestWriteIsIdempotent(t *testing.T) {
 
 func TestWritePermissionsAreReadable(t *testing.T) {
 	w, _ := newTestWriter(t)
-	path, err := w.Write(Item{MediaType: "movie", Title: "Perms", Year: 2020, IMDbID: "tt1"})
+	path, err := w.Write(Item{MediaType: "movie", Title: "Perms", Year: 2020, ID: MediaID{SourceTMDB, "1"}, IMDbID: "tt1"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -224,10 +225,15 @@ func TestWriteValidatesInput(t *testing.T) {
 
 	bad := []Item{
 		{MediaType: "movie", Title: "No ID"},
-		{MediaType: "movie", Title: "Bad ID", IMDbID: "12345"},
-		{MediaType: "audiobook", Title: "Wrong type", IMDbID: "tt1"},
-		{MediaType: "series", Title: "No episode", IMDbID: "tt1", Season: 1},
-		{MediaType: "movie", Title: "", IMDbID: "tt1"},
+		{MediaType: "movie", Title: "No lookup key", ID: MediaID{SourceTMDB, "1"}},
+		{MediaType: "movie", Title: "Bad lookup key", ID: MediaID{SourceTMDB, "1"}, IMDbID: "12345"},
+		{MediaType: "audiobook", Title: "Wrong type", ID: MediaID{SourceTMDB, "1"}, IMDbID: "tt1"},
+		{MediaType: "series", Title: "No episode", ID: MediaID{SourceTVDB, "1"}, IMDbID: "tt1", Season: 1},
+		{MediaType: "movie", Title: "", ID: MediaID{SourceTMDB, "1"}, IMDbID: "tt1"},
+		// Movies must be TMDB and series TVDB; a swapped authority is a
+		// mis-filed item waiting to happen.
+		{MediaType: "movie", Title: "Wrong authority", ID: MediaID{SourceTVDB, "1"}, IMDbID: "tt1"},
+		{MediaType: "series", Title: "Wrong authority", ID: MediaID{SourceTMDB, "1"}, IMDbID: "tt1", Season: 1, Episode: 1},
 	}
 	for _, item := range bad {
 		if _, err := w.Write(item); err == nil {
@@ -238,18 +244,18 @@ func TestWriteValidatesInput(t *testing.T) {
 
 func TestWriteRequiresLibraryRoot(t *testing.T) {
 	w := NewWriter("", "http://127.0.0.1:8080/api/v1/plugins/3", NewSigner("seed"))
-	if _, err := w.Write(Item{MediaType: "movie", Title: "X", IMDbID: "tt1"}); err == nil {
+	if _, err := w.Write(Item{MediaType: "movie", Title: "X", ID: MediaID{SourceTMDB, "1"}, IMDbID: "tt1"}); err == nil {
 		t.Error("Write() succeeded with no library root configured")
 	}
 }
 
 func TestWriteMovieWithoutYear(t *testing.T) {
 	w, root := newTestWriter(t)
-	path, err := w.Write(Item{MediaType: "movie", Title: "Untitled", IMDbID: "tt1"})
+	path, err := w.Write(Item{MediaType: "movie", Title: "Untitled", ID: MediaID{SourceTMDB, "42"}, IMDbID: "tt1"})
 	if err != nil {
 		t.Fatalf("Write() error = %v", err)
 	}
-	want := filepath.Join(root, "Movies", "Untitled", "Untitled.strm")
+	want := filepath.Join(root, "Movies", "Untitled [tmdb-42]", "Untitled.strm")
 	if path != want {
 		t.Errorf("path = %q, want %q", path, want)
 	}

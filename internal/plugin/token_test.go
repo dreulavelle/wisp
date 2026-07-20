@@ -11,7 +11,7 @@ import (
 
 func TestSignerRoundTrip(t *testing.T) {
 	s := NewSigner("https://aio.example/stremio/uuid", "password")
-	req := ResolveRequest{MediaType: "movie", IMDbID: "tt0133093", Quality: "1080p"}
+	req := ResolveRequest{MediaType: "movie", ID: MediaID{SourceTMDB, "603"}, IMDbID: "tt0133093", Quality: "1080p"}
 
 	token := s.Sign(req)
 	if len(token) != tokenLength {
@@ -27,17 +27,18 @@ func TestSignerRoundTrip(t *testing.T) {
 // specific item and becomes a general-purpose key.
 func TestSignerTokenIsBoundToEveryCoordinate(t *testing.T) {
 	s := NewSigner("seed")
-	base := ResolveRequest{MediaType: "series", IMDbID: "tt0944947", Season: 1, Episode: 9, Quality: "1080p"}
+	base := ResolveRequest{MediaType: "series", ID: MediaID{SourceTVDB, "121361"}, IMDbID: "tt0944947", Season: 1, Episode: 9, Quality: "1080p"}
 	token := s.Sign(base)
 
 	variants := map[string]ResolveRequest{
-		"different imdb id": {MediaType: "series", IMDbID: "tt0000001", Season: 1, Episode: 9, Quality: "1080p"},
-		"different season":  {MediaType: "series", IMDbID: "tt0944947", Season: 2, Episode: 9, Quality: "1080p"},
-		"different episode": {MediaType: "series", IMDbID: "tt0944947", Season: 1, Episode: 10, Quality: "1080p"},
-		"different type":    {MediaType: "movie", IMDbID: "tt0944947", Season: 1, Episode: 9, Quality: "1080p"},
+		"different identity": {MediaType: "series", ID: MediaID{SourceTVDB, "999"}, IMDbID: "tt0944947", Season: 1, Episode: 9, Quality: "1080p"},
+		"swapped lookup key": {MediaType: "series", ID: MediaID{SourceTVDB, "121361"}, IMDbID: "tt0000001", Season: 1, Episode: 9, Quality: "1080p"},
+		"different season":   {MediaType: "series", ID: MediaID{SourceTVDB, "121361"}, IMDbID: "tt0944947", Season: 2, Episode: 9, Quality: "1080p"},
+		"different episode":  {MediaType: "series", ID: MediaID{SourceTVDB, "121361"}, IMDbID: "tt0944947", Season: 1, Episode: 10, Quality: "1080p"},
+		"different type":     {MediaType: "movie", ID: MediaID{SourceTVDB, "121361"}, IMDbID: "tt0944947", Season: 1, Episode: 9, Quality: "1080p"},
 		// Quality is signed because a token for 720p must not authorize a
 		// 2160p fetch: that is a different amount of bandwidth and quota.
-		"escalated quality": {MediaType: "series", IMDbID: "tt0944947", Season: 1, Episode: 9, Quality: "2160p"},
+		"escalated quality": {MediaType: "series", ID: MediaID{SourceTVDB, "121361"}, IMDbID: "tt0944947", Season: 1, Episode: 9, Quality: "2160p"},
 	}
 	for name, v := range variants {
 		if s.Verify(v, token) {
@@ -48,7 +49,7 @@ func TestSignerTokenIsBoundToEveryCoordinate(t *testing.T) {
 
 func TestSignerRejectsMalformedTokens(t *testing.T) {
 	s := NewSigner("seed")
-	req := ResolveRequest{MediaType: "movie", IMDbID: "tt0133093"}
+	req := ResolveRequest{MediaType: "movie", ID: MediaID{SourceTMDB, "603"}, IMDbID: "tt0133093"}
 	valid := s.Sign(req)
 
 	bad := []string{
@@ -65,7 +66,7 @@ func TestSignerRejectsMalformedTokens(t *testing.T) {
 // Different deployments must not produce interchangeable tokens, or a token
 // leaked from one install would work against another.
 func TestSignerKeysAreSeedSpecific(t *testing.T) {
-	req := ResolveRequest{MediaType: "movie", IMDbID: "tt0133093"}
+	req := ResolveRequest{MediaType: "movie", ID: MediaID{SourceTMDB, "603"}, IMDbID: "tt0133093"}
 	a := NewSigner("instance-a", "password-a")
 	b := NewSigner("instance-b", "password-b")
 
@@ -99,7 +100,7 @@ func TestResolveRejectsUnsignedRequests(t *testing.T) {
 	h := rt.Handler()
 
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/resolve/movie/tt0133093?quality=1080p", nil))
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/resolve/movie/tmdb:603?imdb=tt0133093&quality=1080p", nil))
 
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("status = %d, want 404 for an unsigned request", rec.Code)
@@ -118,8 +119,8 @@ func TestResolveAcceptsSignedRequests(t *testing.T) {
 		Signer:   signer,
 	})
 
-	req := ResolveRequest{MediaType: "movie", IMDbID: "tt0133093", Quality: "1080p"}
-	url := "/resolve/movie/tt0133093?quality=1080p&t=" + signer.Sign(req)
+	req := ResolveRequest{MediaType: "movie", ID: MediaID{SourceTMDB, "603"}, IMDbID: "tt0133093", Quality: "1080p"}
+	url := "/resolve/movie/tmdb:603?imdb=tt0133093&quality=1080p&t=" + signer.Sign(req)
 
 	rec := httptest.NewRecorder()
 	rt.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, url, nil))
@@ -143,10 +144,10 @@ func TestUnsignedRejectionLooksLikeAnUnknownPath(t *testing.T) {
 	h := rt.Handler()
 
 	unsigned := httptest.NewRecorder()
-	h.ServeHTTP(unsigned, httptest.NewRequest(http.MethodGet, "/resolve/movie/tt0133093", nil))
+	h.ServeHTTP(unsigned, httptest.NewRequest(http.MethodGet, "/resolve/movie/tmdb:603?imdb=tt0133093", nil))
 
 	nonsense := httptest.NewRecorder()
-	h.ServeHTTP(nonsense, httptest.NewRequest(http.MethodGet, "/resolve/movie/tt9999999", nil))
+	h.ServeHTTP(nonsense, httptest.NewRequest(http.MethodGet, "/resolve/movie/tmdb:999999?imdb=tt9999999", nil))
 
 	if unsigned.Code != nonsense.Code || unsigned.Body.String() != nonsense.Body.String() {
 		t.Errorf("responses differ and leak which titles exist:\n  %d %s\n  %d %s",

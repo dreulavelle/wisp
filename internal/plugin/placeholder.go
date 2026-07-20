@@ -38,10 +38,18 @@ type Item struct {
 	MediaType string // "movie" or "series"
 	Title     string
 	Year      int
-	IMDbID    string
-	Season    int
-	Episode   int
-	Quality   string
+
+	// ID is the canonical identity: TMDB for movies, TVDB for series. It names
+	// the folder and is what a media server matches the title on.
+	ID MediaID
+
+	// IMDbID is the provider lookup key, carried into the placeholder URL so
+	// playback needs no metadata call. Wisp resolves it once at write time.
+	IMDbID string
+
+	Season  int
+	Episode int
+	Quality string
 }
 
 // Write creates the placeholder and returns its path.
@@ -54,8 +62,14 @@ func (w *Writer) Write(item Item) (string, error) {
 	if w.root == "" {
 		return "", fmt.Errorf("placeholder: library path is not configured")
 	}
+	if err := ValidateIdentity(item.MediaType, item.ID); err != nil {
+		return "", err
+	}
 	if !strings.HasPrefix(item.IMDbID, "tt") {
-		return "", fmt.Errorf("placeholder: %q is not an IMDb id", item.IMDbID)
+		// Without a lookup key the placeholder would scan in fine and then fail
+		// the first time anyone pressed play, which is the worst possible time
+		// to discover it.
+		return "", fmt.Errorf("placeholder: %s needs an IMDb lookup key", item.ID)
 	}
 
 	rel, err := w.relPath(item)
@@ -99,18 +113,20 @@ func (w *Writer) Write(item Item) (string, error) {
 func (w *Writer) target(item Item) string {
 	req := ResolveRequest{
 		MediaType: item.MediaType,
+		ID:        item.ID,
 		IMDbID:    item.IMDbID,
 		Season:    item.Season,
 		Episode:   item.Episode,
 		Quality:   item.Quality,
 	}
 
-	path := "/resolve/" + item.MediaType + "/" + url.PathEscape(item.IMDbID)
+	path := "/resolve/" + item.MediaType + "/" + url.PathEscape(item.ID.String())
 	if item.MediaType == "series" {
 		path += fmt.Sprintf("/%d/%d", item.Season, item.Episode)
 	}
 
 	q := url.Values{}
+	q.Set("imdb", item.IMDbID)
 	if item.Quality != "" {
 		q.Set("quality", item.Quality)
 	}
@@ -142,13 +158,18 @@ func (w *Writer) relPath(item Item) (string, error) {
 		quality = " [" + sanitize(item.Quality) + "]"
 	}
 
+	// The bracketed id in the folder name is what lets a scanner match the exact
+	// title rather than guessing from the name. Movies carry [tmdb-N] and series
+	// carry [tvdb-N], which is the convention Silo, Plex, Jellyfin and Emby all
+	// already read.
 	switch item.MediaType {
 	case "movie":
 		name := title
 		if item.Year > 0 {
 			name = fmt.Sprintf("%s (%d)", title, item.Year)
 		}
-		return filepath.Join("Movies", name, name+quality+".strm"), nil
+		folder := name + " " + item.ID.FolderTag()
+		return filepath.Join("Movies", folder, name+quality+".strm"), nil
 
 	case "series":
 		if item.Season < 0 || item.Episode < 1 {
@@ -158,8 +179,9 @@ func (w *Writer) relPath(item Item) (string, error) {
 		if item.Year > 0 {
 			show = fmt.Sprintf("%s (%d)", title, item.Year)
 		}
+		folder := show + " " + item.ID.FolderTag()
 		episode := fmt.Sprintf("%s S%02dE%02d%s.strm", show, item.Season, item.Episode, quality)
-		return filepath.Join("Shows", show, fmt.Sprintf("Season %02d", item.Season), episode), nil
+		return filepath.Join("Shows", folder, fmt.Sprintf("Season %02d", item.Season), episode), nil
 
 	default:
 		return "", fmt.Errorf("placeholder: unknown media type %q", item.MediaType)

@@ -24,10 +24,20 @@ var ErrNotResolverPath = errors.New("plugin: not a resolver path")
 // ResolveRequest is a parsed resolver URL.
 type ResolveRequest struct {
 	MediaType string // "movie" or "series"
-	IMDbID    string
-	Season    int
-	Episode   int
-	Quality   string // requested tier, e.g. "2160p"; empty means no preference
+
+	// ID is the canonical library identity: TMDB for movies, TVDB for series.
+	// It is what the library is organized by and what a media server matches on.
+	ID MediaID
+
+	// IMDbID is the lookup key handed to the stream provider. It travels with
+	// the request rather than being derived at play time, because deriving it
+	// would put two metadata API calls in front of every playback — latency a
+	// user spends staring at a spinner.
+	IMDbID string
+
+	Season  int
+	Episode int
+	Quality string // requested tier, e.g. "2160p"; empty means no preference
 }
 
 // ParseResolvePath parses the path half of a resolver URL.
@@ -57,9 +67,19 @@ func ParseResolvePath(path string) (ResolveRequest, error) {
 		return ResolveRequest{}, ErrNotResolverPath
 	}
 
+	id, err := ParseMediaID(parts[idx+2])
+	if err != nil {
+		return ResolveRequest{}, err
+	}
+
 	req := ResolveRequest{
 		MediaType: parts[idx+1],
-		IMDbID:    parts[idx+2],
+		ID:        id,
+	}
+	// A bare IMDb id in the path is accepted so hand-written placeholders keep
+	// working, but it is a lookup key rather than an identity.
+	if id.Source == SourceIMDb {
+		req.IMDbID = id.Value
 	}
 
 	switch req.MediaType {
@@ -84,9 +104,6 @@ func ParseResolvePath(path string) (ResolveRequest, error) {
 		return ResolveRequest{}, fmt.Errorf("plugin: unknown media type %q", req.MediaType)
 	}
 
-	if !strings.HasPrefix(req.IMDbID, "tt") {
-		return ResolveRequest{}, fmt.Errorf("plugin: %q is not an IMDb id", req.IMDbID)
-	}
 	return req, nil
 }
 
@@ -109,6 +126,11 @@ func NewResolver(streams searcher) *Resolver {
 // ErrNoMatch means nothing playable was found for the request.
 var ErrNoMatch = errors.New("plugin: no playable stream for this title")
 
+// ErrNoLookupKey means the request carries a canonical identity but no IMDb id
+// to search the provider with. A placeholder written by Wisp always carries
+// one; this indicates a hand-written or truncated placeholder.
+var ErrNoLookupKey = errors.New("plugin: request has no IMDb lookup key")
+
 // Resolve returns a directly playable URL for a request.
 //
 // Candidate ordering is AIOStreams' own: it already parses, ranks, and filters
@@ -116,6 +138,13 @@ var ErrNoMatch = errors.New("plugin: no playable stream for this title")
 // override settings made in one obvious place. Selection is therefore "first
 // candidate at an acceptable quality".
 func (r *Resolver) Resolve(ctx context.Context, req ResolveRequest) (aiostreams.Stream, error) {
+	// AIOStreams accepts IMDb ids and nothing else: tmdb: and tvdb: ids return
+	// zero candidates against a live instance. Without a lookup key there is
+	// nothing to search for.
+	if req.IMDbID == "" {
+		return aiostreams.Stream{}, ErrNoLookupKey
+	}
+
 	streams, err := r.streams.Search(ctx, req.MediaType, req.IMDbID, req.Season, req.Episode)
 	if err != nil {
 		return aiostreams.Stream{}, err

@@ -126,6 +126,9 @@ func (rt *Router) handleResolve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.Quality = strings.TrimSpace(r.URL.Query().Get("quality"))
+	if imdb := strings.TrimSpace(r.URL.Query().Get("imdb")); imdb != "" {
+		req.IMDbID = imdb
+	}
 
 	// Authenticate before doing any upstream work. An unsigned request must
 	// cost nothing: otherwise the public route becomes a way to drive load
@@ -145,11 +148,11 @@ func (rt *Router) handleResolve(w http.ResponseWriter, r *http.Request) {
 
 	if err != nil {
 		rt.recorder.Record(Activity{
-			At: start, IMDbID: req.IMDbID, Quality: req.Quality,
+			At: start, MediaID: req.ID.String(), Quality: req.Quality,
 			SearchMS: elapsed.Milliseconds(), TotalMS: elapsed.Milliseconds(),
 			Error: shortReason(err),
 		})
-		rt.library.MarkFailed(req.IMDbID, req.Season, req.Episode, shortReason(err))
+		rt.library.MarkFailed(req.ID, req.Season, req.Episode, shortReason(err))
 		rt.writeResolveError(w, req, err, elapsed)
 		return
 	}
@@ -158,15 +161,15 @@ func (rt *Router) handleResolve(w http.ResponseWriter, r *http.Request) {
 	// makes it obvious on the dashboard that latency lives upstream, which is
 	// the first question an operator asks when playback feels slow.
 	rt.recorder.Record(Activity{
-		At: start, Title: stream.Filename, IMDbID: req.IMDbID,
+		At: start, Title: stream.Filename, MediaID: req.ID.String(),
 		Quality:  stream.Resolution,
 		SearchMS: elapsed.Milliseconds(), SelectMS: 0, RedirectMS: 0,
 		TotalMS: elapsed.Milliseconds(),
 	})
-	rt.library.MarkResolved(req.IMDbID, req.Season, req.Episode)
+	rt.library.MarkResolved(req.ID, req.Season, req.Episode)
 
 	rt.log.Info("resolve: redirecting",
-		"media_type", req.MediaType, "imdb_id", req.IMDbID,
+		"media_type", req.MediaType, "id", req.ID.String(),
 		"season", req.Season, "episode", req.Episode,
 		"requested_quality", req.Quality, "served_quality", stream.Resolution,
 		"elapsed_ms", elapsed.Milliseconds())
@@ -183,11 +186,15 @@ func (rt *Router) handleResolve(w http.ResponseWriter, r *http.Request) {
 // release yet should not look like a broken plugin.
 func (rt *Router) writeResolveError(w http.ResponseWriter, req ResolveRequest, err error, elapsed time.Duration) {
 	log := rt.log.With(
-		"media_type", req.MediaType, "imdb_id", req.IMDbID,
+		"media_type", req.MediaType, "id", req.ID.String(),
 		"season", req.Season, "episode", req.Episode,
 		"elapsed_ms", elapsed.Milliseconds())
 
 	switch {
+	case errors.Is(err, ErrNoLookupKey):
+		log.Error("resolve: placeholder carries no IMDb lookup key")
+		writeError(w, http.StatusBadRequest, "placeholder is missing its lookup key")
+
 	case errors.Is(err, ErrNoMatch):
 		// Nothing playable right now. Normal for unreleased or thinly-seeded
 		// titles, so this is info rather than an error.
@@ -217,6 +224,8 @@ func isTransient(err error) bool {
 // which can carry credentials embedded in resolver URLs.
 func shortReason(err error) string {
 	switch {
+	case errors.Is(err, ErrNoLookupKey):
+		return "missing lookup key"
 	case errors.Is(err, ErrNoMatch):
 		return "no playable stream"
 	case isTransient(err):

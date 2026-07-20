@@ -75,7 +75,7 @@ func TestAdminSettingsNeverExposesTheAIOStreamsURL(t *testing.T) {
 
 func TestAdminStatusShape(t *testing.T) {
 	rt, h := testRouter(t, NewResolver(&stubSearcher{}))
-	rt.library.Add(Placeholder{Path: "/library/Movies/A/A.strm", IMDbID: "tt1"})
+	rt.library.Add(Placeholder{Path: "/library/Movies/A/A.strm", ID: MediaID{SourceTMDB, "603"}, IMDbID: "tt0133093"})
 
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/admin/api/status", nil))
@@ -98,10 +98,10 @@ func TestResolveIsRecordedForTheDashboard(t *testing.T) {
 	rt, h := testRouter(t, NewResolver(&stubSearcher{streams: []aiostreams.Stream{
 		{URL: "https://cdn/a.mkv", Resolution: "1080p", Filename: "A.1080p.mkv"},
 	}}))
-	rt.library.Add(Placeholder{Path: "/library/Movies/A/A.strm", IMDbID: "tt0133093"})
+	rt.library.Add(Placeholder{Path: "/library/Movies/A/A.strm", ID: MediaID{SourceTMDB, "603"}, IMDbID: "tt0133093"})
 
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/resolve/movie/tt0133093", nil))
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/resolve/movie/tmdb:603?imdb=tt0133093", nil))
 	if rec.Code != http.StatusFound {
 		t.Fatalf("resolve status = %d, want 302", rec.Code)
 	}
@@ -127,10 +127,10 @@ func TestFailedResolveIsRecordedWithoutLeakingDetail(t *testing.T) {
 	rt, h := testRouter(t, NewResolver(&stubSearcher{
 		err: &aiostreams.SearchError{Kind: aiostreams.KindTransient},
 	}))
-	rt.library.Add(Placeholder{Path: "/library/Movies/A/A.strm", IMDbID: "tt0133093"})
+	rt.library.Add(Placeholder{Path: "/library/Movies/A/A.strm", ID: MediaID{SourceTMDB, "603"}, IMDbID: "tt0133093"})
 
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/resolve/movie/tt0133093", nil))
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/resolve/movie/tmdb:603?imdb=tt0133093", nil))
 
 	entries := rt.recorder.Snapshot()
 	if len(entries) != 1 || entries[0].Error == "" {
@@ -173,9 +173,9 @@ func TestRecorderMedian(t *testing.T) {
 // lie about what has ever played.
 func TestLibraryAddPreservesHistory(t *testing.T) {
 	l := NewLibrary()
-	l.Add(Placeholder{Path: "/a.strm", IMDbID: "tt1", Quality: "1080p"})
-	l.MarkResolved("tt1", 0, 0)
-	l.Add(Placeholder{Path: "/a.strm", IMDbID: "tt1", Quality: "2160p"})
+	l.Add(Placeholder{Path: "/a.strm", ID: MediaID{SourceTMDB, "1"}, Quality: "1080p"})
+	l.MarkResolved(MediaID{SourceTMDB, "1"}, 0, 0)
+	l.Add(Placeholder{Path: "/a.strm", ID: MediaID{SourceTMDB, "1"}, Quality: "2160p"})
 
 	items := l.List()
 	if len(items) != 1 {
