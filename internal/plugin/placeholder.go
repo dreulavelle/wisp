@@ -9,6 +9,9 @@ import (
 	"unicode"
 )
 
+// Extension is the file extension that marks a placeholder.
+const Extension = ".strm"
+
 // Writer creates .strm placeholders in a media library.
 //
 // A placeholder holds a URL addressing this plugin, never a stream. That is

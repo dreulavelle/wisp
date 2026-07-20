@@ -43,6 +43,7 @@ type runtimeServer struct {
 	manifest *pluginv1.PluginManifest
 	routes   *plugin.HTTPRoutes
 	router   *plugin.RequestRouter
+	monitor  *plugin.MonitorHolder
 	log      *slog.Logger
 	library  *plugin.Library
 	recorder *plugin.Recorder
@@ -108,11 +109,22 @@ func (s *runtimeServer) Configure(_ context.Context, req *pluginv1.ConfigureRequ
 	// intake is wired here rather than at startup.
 	if next.libraryPath != "" {
 		writer := plugin.NewWriter(next.libraryPath, s.resolverBase(), plugin.NewSigner(next.aioURL, next.aioPassword))
+
+		// The index lives in memory; the placeholders on disk are the durable
+		// record. Rebuilding here means a restarted plugin knows what it has
+		// already written instead of treating the library as empty.
+		if adopted, skipped, err := s.library.Rebuild(next.libraryPath); err != nil {
+			s.log.Warn("configure: could not rebuild the library index", "error", err)
+		} else {
+			s.log.Info("configure: library index rebuilt", "adopted", adopted, "skipped", skipped)
+		}
+
 		// Episode numbering comes from Cinemeta, whose series data is
 		// TVDB-derived, so seasons and episodes line up with what media servers
 		// expect without needing a TVDB key of our own.
 		meta := plugin.NewMetadataAdapter(metadata.New("", nil))
 		s.router.SetIntake(plugin.NewIntake(writer, s.library, meta, s.log).WithIdentityResolver(meta))
+		s.monitor.Set(plugin.NewMonitor(s.library, writer, meta, s.log))
 	} else {
 		s.log.Warn("configure: no library path set; requests cannot create placeholders")
 	}
@@ -154,6 +166,7 @@ func main() {
 	library := plugin.NewLibrary()
 	recorder := plugin.NewRecorder()
 	router := plugin.NewRequestRouter(nil)
+	monitor := plugin.NewMonitorHolder()
 
 	sdkruntime.Serve(sdkruntime.ServeConfig{
 		Servers: sdkruntime.CapabilityServers{
@@ -162,6 +175,7 @@ func main() {
 				routes:   routes,
 				log:      log,
 				router:   router,
+				monitor:  monitor,
 				library:  library,
 				recorder: recorder,
 			},
@@ -173,6 +187,10 @@ func main() {
 			// Requests made in Silo's own UI route here, so users never have to
 			// learn a second interface.
 			RequestRouter: router,
+			// Fills in episodes that aired since the last pass. Pure bookkeeping:
+			// a new episode only needs a placeholder, and resolution happens later
+			// if anyone plays it.
+			ScheduledTask: monitor,
 		},
 	})
 }
