@@ -4,8 +4,14 @@
   "siloApiVersion": "v1",
   "category": "Video/Wisp",
   "supportedPlatforms": [
-    { "os": "linux", "arch": "amd64" },
-    { "os": "linux", "arch": "arm64" }
+    {
+      "os": "linux",
+      "arch": "amd64"
+    },
+    {
+      "os": "linux",
+      "arch": "arm64"
+    }
   ],
   "capabilities": [
     {
@@ -47,6 +53,12 @@
           }
         }
       ]
+    },
+    {
+      "type": "scan_source.v1",
+      "id": "wisp-placeholders",
+      "displayName": "Wisp placeholders",
+      "description": "Reports newly written .strm placeholders to Silo's autoscan, so requested items appear without a full library scan."
     }
   ],
   "httpRoutes": [
@@ -75,7 +87,7 @@
   "presentation": {
     "displayName": "Wisp",
     "summary": "On-demand playback: requests become instant library placeholders, resolved to a real stream the moment someone presses play.",
-    "descriptionMarkdown": "Wisp turns a request into a playable library item immediately. It writes a small `.strm` placeholder into your library, Silo picks it up on the next scan, and the actual stream is resolved through AIOStreams only when playback begins.\n\nBecause nothing durable ever stores a stream URL, expiring debrid links stop being a problem: every play resolves fresh. There is no mount, no FUSE, and no privileged container — a placeholder is an ordinary text file.\n\nRequires a Silo build with `.strm` support.",
+    "descriptionMarkdown": "Wisp turns a request into a playable library item immediately. It writes a small `.strm` placeholder into your library, Silo picks it up on the next scan, and the actual stream is resolved through AIOStreams only when playback begins.\n\nBecause nothing durable ever stores a stream URL, expiring debrid links stop being a problem: every play resolves fresh. There is no mount, no FUSE, and no privileged container \u2014 a placeholder is an ordinary text file.\n\nRequires a Silo build with `.strm` support.",
     "setupMarkdown": "1. Install the plugin.\n2. Set the AIOStreams URL and password, and the library path Wisp should write placeholders into.\n3. Create a Silo library pointed at that same path.\n4. Request something, then run a scan.",
     "homepageUrl": "https://github.com/dreulavelle/wisp",
     "sourceUrl": "https://github.com/dreulavelle/wisp",

@@ -117,6 +117,8 @@ func main() {
 	}
 
 	routes := plugin.NewHTTPRoutes()
+	library := plugin.NewLibrary()
+	recorder := plugin.NewRecorder()
 
 	sdkruntime.Serve(sdkruntime.ServeConfig{
 		Servers: sdkruntime.CapabilityServers{
@@ -124,10 +126,14 @@ func main() {
 				manifest: manifest,
 				routes:   routes,
 				log:      log,
-				library:  plugin.NewLibrary(),
-				recorder: plugin.NewRecorder(),
+				library:  library,
+				recorder: recorder,
 			},
 			HttpRoutes: routes,
+			// Autoscan pulls new placeholders from us rather than us pushing
+			// webhooks at a media server: the host then owns the poll timer,
+			// marker persistence, and path rewriting.
+			ScanSource: plugin.NewScanSource(library, log),
 		},
 	})
 }

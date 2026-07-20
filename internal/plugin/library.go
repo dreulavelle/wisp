@@ -19,6 +19,12 @@ type Placeholder struct {
 	LastResolvedAt *time.Time `json:"last_resolved_at"`
 	LastError      string     `json:"last_error,omitempty"`
 	Plays          int        `json:"plays"`
+
+	// seq orders placeholders by when Wisp wrote them. The autoscan marker is a
+	// sequence number rather than a timestamp because two placeholders written
+	// in the same millisecond must still be distinguishable — otherwise a poll
+	// landing between them silently drops one.
+	seq uint64
 }
 
 // Library tracks the placeholders Wisp has written.
@@ -30,6 +36,7 @@ type Placeholder struct {
 type Library struct {
 	mu    sync.RWMutex
 	items map[string]*Placeholder
+	seq   uint64
 }
 
 // NewLibrary returns an empty index.
@@ -54,6 +61,8 @@ func (l *Library) Add(p Placeholder) {
 	if p.CreatedAt.IsZero() {
 		p.CreatedAt = time.Now()
 	}
+	l.seq++
+	p.seq = l.seq
 	copyOf := p
 	l.items[p.Path] = &copyOf
 }
@@ -113,4 +122,39 @@ func (l *Library) List() []Placeholder {
 		return ti.After(tj)
 	})
 	return out
+}
+
+// Cursor returns the current sequence position.
+//
+// Used to answer a first poll: the autoscan contract says an empty marker means
+// "start from now", so a source that has just been configured must report where
+// it is rather than replaying every placeholder ever written.
+func (l *Library) Cursor() uint64 {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	return l.seq
+}
+
+// Since returns placeholders written after a sequence position, oldest first,
+// along with the new position.
+//
+// Ordering matters: the host stores the returned marker verbatim, so reporting
+// paths out of order would let a crash between polls lose the ones in between.
+func (l *Library) Since(marker uint64) ([]Placeholder, uint64) {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+
+	var out []Placeholder
+	for _, p := range l.items {
+		if p.seq > marker {
+			out = append(out, *p)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].seq < out[j].seq })
+
+	next := marker
+	if len(out) > 0 {
+		next = out[len(out)-1].seq
+	}
+	return out, next
 }
