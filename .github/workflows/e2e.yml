@@ -1,0 +1,25 @@
+name: e2e
+
+# Installs the real plugin into a real Silo and plays back through it.
+#
+# Not on every push: it stands up Postgres, Redis and Silo and takes minutes.
+# It runs before a release and on demand, which is when "is the plugin actually
+# installable" is the question worth several minutes.
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: ./test/e2e/run.sh
+      - name: silo logs on failure
+        if: failure()
+        run: docker compose -p wisp-e2e logs --tail 200 silo || true

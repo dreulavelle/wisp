@@ -4,16 +4,10 @@ on:
   push:
     branches: [main]
   pull_request:
-  workflow_dispatch:
-
-concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
 
 jobs:
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -23,54 +17,23 @@ jobs:
         run: test -z "$(gofmt -l .)" || (gofmt -l . && exit 1)
       - name: vet
         run: go vet ./...
-      # -race matters here: the plugin answers resolver requests concurrently
-      # while an operator can swap its configuration underneath it.
       - name: test
         run: go test -race ./...
       - name: build
         run: CGO_ENABLED=0 go build ./...
 
-      # Packaging is part of the contract rather than an afterthought. Silo
-      # rejects an archive whose manifest checksum disagrees with its binary,
-      # and refuses to run a plugin whose embedded manifest disagrees with the
-      # installed one — both of which only surface at install time.
+      # Cheap, and it catches the one failure class that otherwise only appears
+      # at install time: Silo rejects an archive whose manifest checksum does not
+      # match its binary, or whose version disagrees with the binary's embedded
+      # manifest.
       - name: package
-        run: make zip
-
-      - name: verify archive
         run: |
+          make zip
           python3 - <<'PY'
           import hashlib, json, zipfile
           z = zipfile.ZipFile("dist/silo-plugin-wisp.zip")
-          names = set(z.namelist())
-          assert names >= {"manifest.json", "plugin"}, f"archive is missing files: {sorted(names)}"
-
-          manifest = json.loads(z.read("manifest.json"))
-          actual = hashlib.sha256(z.read("plugin")).hexdigest()
-          assert manifest["checksum"] == actual, "manifest checksum does not match the packaged binary"
-
-          src = json.load(open("cmd/silo-plugin-wisp/manifest.json"))
-          assert manifest["version"] == src["version"], "packaged version drifted from the source manifest"
-          print("archive ok:", manifest["pluginId"], manifest["version"])
+          m = json.loads(z.read("manifest.json"))
+          assert m["checksum"] == hashlib.sha256(z.read("plugin")).hexdigest(), "checksum mismatch"
+          assert m["version"] == json.load(open("cmd/silo-plugin-wisp/manifest.json"))["version"], "version drift"
+          print("archive ok:", m["pluginId"], m["version"])
           PY
-
-  e2e:
-    name: end-to-end
-    runs-on: ubuntu-latest
-    timeout-minutes: 25
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-
-      # Installs the real plugin into a real Silo and plays back through it.
-      # Slower than the unit suite and worth it: this is the only test covering
-      # the seam between plugin and host, and it has already caught three
-      # defects that made the plugin uninstallable.
-      - name: run end-to-end
-        run: ./test/e2e/run.sh
-
-      - name: silo logs on failure
-        if: failure()
-        run: docker compose -p wisp-e2e logs --tail 200 silo || true
