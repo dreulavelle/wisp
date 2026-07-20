@@ -59,6 +59,12 @@
       "id": "wisp-placeholders",
       "displayName": "Wisp placeholders",
       "description": "Reports newly written .strm placeholders to Silo's autoscan, so requested items appear without a full library scan."
+    },
+    {
+      "type": "request_router.v1",
+      "id": "wisp-requests",
+      "displayName": "Wisp",
+      "description": "Turns a Silo request into a playable placeholder immediately, resolved on demand at playback."
     }
   ],
   "httpRoutes": [

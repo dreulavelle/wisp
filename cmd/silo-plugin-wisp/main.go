@@ -41,6 +41,7 @@ type runtimeServer struct {
 
 	manifest *pluginv1.PluginManifest
 	routes   *plugin.HTTPRoutes
+	router   *plugin.RequestRouter
 	log      *slog.Logger
 	library  *plugin.Library
 	recorder *plugin.Recorder
@@ -102,10 +103,38 @@ func (s *runtimeServer) Configure(_ context.Context, req *pluginv1.ConfigureRequ
 		// restarts without persisting a secret anywhere.
 		Signer: plugin.NewSigner(next.aioURL, next.aioPassword),
 	}).Handler())
+	// Requests can only produce placeholders once a library path is known, so
+	// intake is wired here rather than at startup.
+	if next.libraryPath != "" {
+		writer := plugin.NewWriter(next.libraryPath, s.resolverBase(), plugin.NewSigner(next.aioURL, next.aioPassword))
+		s.router.SetIntake(plugin.NewIntake(writer, s.library, nil, s.log))
+	} else {
+		s.log.Warn("configure: no library path set; requests cannot create placeholders")
+	}
+
 	s.log.Info("configure: resolver ready", "aiostreams_host", host, "library_path", next.libraryPath)
 
 	return &pluginv1.ConfigureResponse{}, nil
 }
+
+// resolverBase is the URL placeholders point at.
+//
+// Silo reaches its plugins over loopback, and resolves that hop itself before
+// redirecting a client, so a host-local base is correct here — a client is
+// never sent to this address.
+func (s *runtimeServer) resolverBase() string {
+	if host := sdkruntime.Host(); host != nil {
+		if info, err := host.GetHostInfo(context.Background()); err == nil {
+			if base := strings.TrimSpace(info.PluginProxyBaseURL); base != "" {
+				return base
+			}
+		}
+	}
+	return defaultResolverBase
+}
+
+// defaultResolverBase is used when the host cannot supply its plugin proxy URL.
+const defaultResolverBase = "http://127.0.0.1:8080/api/v1/plugins/1"
 
 func main() {
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -119,6 +148,7 @@ func main() {
 	routes := plugin.NewHTTPRoutes()
 	library := plugin.NewLibrary()
 	recorder := plugin.NewRecorder()
+	router := plugin.NewRequestRouter(nil)
 
 	sdkruntime.Serve(sdkruntime.ServeConfig{
 		Servers: sdkruntime.CapabilityServers{
@@ -126,6 +156,7 @@ func main() {
 				manifest: manifest,
 				routes:   routes,
 				log:      log,
+				router:   router,
 				library:  library,
 				recorder: recorder,
 			},
@@ -134,6 +165,9 @@ func main() {
 			// webhooks at a media server: the host then owns the poll timer,
 			// marker persistence, and path rewriting.
 			ScanSource: plugin.NewScanSource(library, log),
+			// Requests made in Silo's own UI route here, so users never have to
+			// learn a second interface.
+			RequestRouter: router,
 		},
 	})
 }

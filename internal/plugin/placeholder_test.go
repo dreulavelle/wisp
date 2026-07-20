@@ -260,3 +260,20 @@ func TestWriteMovieWithoutYear(t *testing.T) {
 		t.Errorf("path = %q, want %q", path, want)
 	}
 }
+
+// parseResolverURL parses a placeholder's contents back into the request it
+// addresses, so tests can assert a written placeholder is self-consistent.
+func parseResolverURL(t *testing.T, raw string) (*url.URL, ResolveRequest) {
+	t.Helper()
+	u, err := url.Parse(raw)
+	if err != nil {
+		t.Fatalf("placeholder is not a URL: %v", err)
+	}
+	req, err := ParseResolvePath(u.Path)
+	if err != nil {
+		t.Fatalf("placeholder path does not parse: %v", err)
+	}
+	req.Quality = u.Query().Get("quality")
+	req.IMDbID = u.Query().Get("imdb")
+	return u, req
+}
