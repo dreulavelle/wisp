@@ -22,6 +22,11 @@ type Config struct {
 	ListenAddr string
 	// DBPath is where the pin database lives.
 	DBPath string
+	// LibraryPath is the directory wisp writes .strm placeholders into, as the
+	// media server sees it. It replaces the old FUSE mountpoint: nothing is
+	// mounted any more, so this is an ordinary directory both wisp and the
+	// media server can read.
+	LibraryPath string
 	// SiloWebhookURL is the deprecated alias for NotifyArrWebhookURL
 	// (WISP_SILO_WEBHOOK_URL). It still works; the canonical name wins if both
 	// are set.
@@ -41,14 +46,7 @@ type Config struct {
 	// per-folder partial scans.
 	NotifyPlexURL   string
 	NotifyPlexToken string
-	// MountPath, when set, makes wisp self-mount the library there via the
-	// embedded rclone VFS. Empty = serve HTTP only (mount it yourself).
-	MountPath string
-	// MountAllowOther exposes the mount to other users (needed when another
-	// container reads the mount as a different UID).
-	MountAllowOther bool
-	// LogLevel is one of debug, info, warn, error.
-	LogLevel string
+	LogLevel        string
 	// ReadChunkSize is the initial VFS read chunk in bytes; it doubles up to
 	// ReadChunkSizeLimit. Smaller reduces debrid over-fetch on seeks (more
 	// concurrent viewers per bandwidth); larger favors sequential throughput.
@@ -89,9 +87,6 @@ type Config struct {
 	ProbeTimeout time.Duration
 }
 
-// SelfMount reports whether wisp should mount the library itself.
-func (c *Config) SelfMount() bool { return c.MountPath != "" }
-
 // Load reads configuration from environment variables and validates it.
 func Load() (*Config, error) {
 	c := &Config{
@@ -99,6 +94,7 @@ func Load() (*Config, error) {
 		AIOStreamsPassword:   os.Getenv("WISP_AIOSTREAMS_PASSWORD"),
 		ListenAddr:           envOr("WISP_LISTEN_ADDR", ":8080"),
 		DBPath:               envOr("WISP_DB_PATH", "/data/wisp.db"),
+		LibraryPath:          libraryPath(),
 		SiloWebhookURL:       strings.TrimSpace(os.Getenv("WISP_SILO_WEBHOOK_URL")),
 		NotifyArrWebhookURL:  strings.TrimSpace(os.Getenv("WISP_NOTIFY_ARR_WEBHOOK_URL")),
 		NotifyJellyfinURL:    strings.TrimSpace(os.Getenv("WISP_NOTIFY_JELLYFIN_URL")),
@@ -107,8 +103,6 @@ func Load() (*Config, error) {
 		NotifyEmbyAPIKey:     strings.TrimSpace(os.Getenv("WISP_NOTIFY_EMBY_API_KEY")),
 		NotifyPlexURL:        strings.TrimSpace(os.Getenv("WISP_NOTIFY_PLEX_URL")),
 		NotifyPlexToken:      strings.TrimSpace(os.Getenv("WISP_NOTIFY_PLEX_TOKEN")),
-		MountPath:            strings.TrimSpace(os.Getenv("WISP_MOUNT_PATH")),
-		MountAllowOther:      boolEnv("WISP_MOUNT_ALLOW_OTHER", true),
 		LogLevel:             strings.ToLower(envOr("WISP_LOG_LEVEL", "info")),
 		ReadChunkSize:        sizeEnv("WISP_READ_CHUNK_SIZE", 32<<20),
 		ReadChunkSizeLimit:   sizeEnv("WISP_READ_CHUNK_SIZE_LIMIT", 512<<20),
@@ -234,4 +228,18 @@ func boolEnv(key string, fallback bool) bool {
 	default:
 		return fallback
 	}
+}
+
+// libraryPath resolves where .strm placeholders are written.
+//
+// WISP_MOUNT_PATH is accepted as a deprecated alias: it named the FUSE
+// mountpoint in the pre-.strm architecture, and existing deployments set it.
+// Nothing is mounted now, but the value points at the same directory a media
+// server scans, so honouring it keeps those deployments working across the
+// upgrade instead of silently writing placeholders somewhere else.
+func libraryPath() string {
+	if p := strings.TrimSpace(os.Getenv("WISP_LIBRARY_PATH")); p != "" {
+		return p
+	}
+	return strings.TrimSpace(os.Getenv("WISP_MOUNT_PATH"))
 }

@@ -47,13 +47,17 @@ func TestMountedDeleteUnpinsAndNotifiesSilo(t *testing.T) {
 	}
 
 	a := &app{store: st, log: slog.New(slog.DiscardHandler),
-		webhook: notify.New(notify.Options{ArrWebhookURL: silo.URL, MountPath: "/mnt/wisp"}, slog.New(slog.DiscardHandler))}
+		webhook: notify.New(notify.Options{ArrWebhookURL: silo.URL, MountPath: "/library"}, slog.New(slog.DiscardHandler))}
 
-	if err := a.deleteMountedPin(context.Background(), vpath); err != nil {
-		t.Fatalf("deleteMountedPin: %v", err)
+	existed, err := a.deletePin(context.Background(), vpath)
+	if err != nil {
+		t.Fatalf("deletePin: %v", err)
+	}
+	if !existed {
+		t.Fatal("deletePin reported the pin as absent")
 	}
 	if pin, _ := st.ByPath(context.Background(), vpath); pin != nil {
-		t.Fatal("pin still present after mounted delete")
+		t.Fatal("pin still present after delete")
 	}
 	// Delivery is fire-and-forget on a detached goroutine; wait for it.
 	select {

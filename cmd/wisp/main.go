@@ -22,11 +22,9 @@ import (
 	"github.com/dreulavelle/wisp/internal/library"
 	"github.com/dreulavelle/wisp/internal/metadata"
 	"github.com/dreulavelle/wisp/internal/monitor"
-	"github.com/dreulavelle/wisp/internal/mount"
 	"github.com/dreulavelle/wisp/internal/notify"
 	"github.com/dreulavelle/wisp/internal/server"
 	"github.com/dreulavelle/wisp/internal/store"
-	"github.com/rclone/rclone/fs"
 )
 
 func main() {
@@ -58,7 +56,7 @@ func main() {
 		JellyfinURL:    cfg.NotifyJellyfinURL, JellyfinAPIKey: cfg.NotifyJellyfinAPIKey,
 		EmbyURL: cfg.NotifyEmbyURL, EmbyAPIKey: cfg.NotifyEmbyAPIKey,
 		PlexURL: cfg.NotifyPlexURL, PlexToken: cfg.NotifyPlexToken,
-		MountPath: cfg.MountPath,
+		MountPath: cfg.LibraryPath,
 	}, log)
 	if targets := notifier.Targets(); len(targets) > 0 {
 		log.Info("media-server notifications enabled", "targets", targets)
@@ -69,7 +67,7 @@ func main() {
 		log.Warn("no AIOStreams password set; the Search API needs Basic auth unless your instance allows unauthenticated requests — set WISP_AIOSTREAMS_PASSWORD if adds return aiostreams_auth")
 	}
 	app := &app{
-		store: st, aio: aio, log: log, mountPath: cfg.MountPath,
+		store: st, aio: aio, log: log,
 		webhook: notifier,
 		meta:    metadata.New(cfg.TMDBAPIKey, cfg.TMDBMarkets, metadata.WithLogger(log)),
 		prober: newProber(probeConfig{
@@ -118,36 +116,10 @@ func main() {
 		}
 	}()
 
-	var mnt *mount.Mount
-	if cfg.SelfMount() {
-		m, err := mount.Start(context.Background(), mount.Options{
-			ServerURL:          "http://127.0.0.1" + portOf(cfg.ListenAddr),
-			Mountpoint:         cfg.MountPath,
-			AllowOther:         cfg.MountAllowOther,
-			ReadChunkSize:      cfg.ReadChunkSize,
-			ReadChunkSizeLimit: cfg.ReadChunkSizeLimit,
-			Delete:             app.deleteMountedPin,
-		}, log)
-		if err != nil {
-			log.Error("self-mount failed", "error", err)
-			os.Exit(1)
-		}
-		mnt = m
-		app.mnt = m
-	} else {
-		log.Info("serving HTTP only; mount it with rclone (set WISP_MOUNT_PATH to self-mount)")
-	}
-
-	// Graceful shutdown: unmount before exit so the mountpoint isn't left stale.
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 	<-stop
 	log.Info("shutting down")
-	if mnt != nil {
-		if err := mnt.Close(); err != nil {
-			log.Warn("unmount", "error", err)
-		}
-	}
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_ = httpSrv.Shutdown(shutdownCtx)
@@ -182,12 +154,10 @@ type app struct {
 	aio       *aiostreams.Client
 	log       *slog.Logger
 	srv       *server.Server
-	mnt       *mount.Mount
 	webhook   notify.Notifier
 	meta      *metadata.Service
 	mon       *monitor.Monitor
 	prober    *prober
-	mountPath string
 	startedAt time.Time
 	// pinMu serializes the store-mutation half of pin() (list → upsert → delete
 	// of superseded pins) so concurrent pins — API and scheduler — can't clobber
@@ -503,22 +473,11 @@ func (a *app) deletePin(ctx context.Context, path string) (bool, error) {
 		return existed, err
 	}
 	a.log.Info("deleted", "path", path)
-	// Fire from the shared helper so both the API and a mounted `rm` notify Silo.
+	// Fire from the shared helper so every delete path notifies Silo.
 	// The bulk (imdb_id) delete path uses DeleteByMedia directly and emits its own
 	// events, so this does not double-fire.
 	a.webhook.Delete(ctx, mediaTypeForPath(path), path)
 	return true, nil
-}
-
-func (a *app) deleteMountedPin(ctx context.Context, path string) error {
-	existed, err := a.deletePin(ctx, path)
-	if err != nil {
-		return err
-	}
-	if !existed {
-		return fs.ErrorObjectNotFound
-	}
-	return nil
 }
 
 func (a *app) handleStatus(w http.ResponseWriter, r *http.Request) {
@@ -529,8 +488,6 @@ func (a *app) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"uptime_seconds": int(time.Since(a.startedAt).Seconds()),
 		"pins":           count,
 		"monitors":       monitors,
-		"mounted":        a.mnt.Healthy(),
-		"mount_path":     a.mountPath,
 		"schedule": map[string]any{
 			"monitors":         monitors,
 			"interval_seconds": int(a.mon.Interval().Seconds()),
@@ -541,10 +498,6 @@ func (a *app) handleStatus(w http.ResponseWriter, r *http.Request) {
 func (a *app) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	m := a.srv.Metrics()
 	pins, _ := a.store.Count(r.Context())
-	mounted := 0
-	if a.mnt.Healthy() {
-		mounted = 1
-	}
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 	metric := func(name, help, typ string, val int64) {
 		fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s %s\n%s %d\n", name, help, name, typ, name, val)
@@ -552,7 +505,6 @@ func (a *app) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	monitors, _ := a.store.CountMonitored(r.Context())
 	metric("wisp_pins", "Pinned media files.", "gauge", int64(pins))
 	metric("wisp_monitors", "Titles on the monitor watchlist.", "gauge", int64(monitors))
-	metric("wisp_mounted", "FUSE mount live (1) or not (0).", "gauge", int64(mounted))
 	metric("wisp_uptime_seconds", "Process uptime.", "gauge", int64(time.Since(a.startedAt).Seconds()))
 	metric("wisp_file_requests_total", "Byte-range file requests served.", "counter", m.FileRequests)
 	metric("wisp_link_cache_hits_total", "CDN URL cache hits.", "counter", m.CacheHits)
