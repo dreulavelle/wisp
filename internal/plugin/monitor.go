@@ -13,6 +13,12 @@ import (
 )
 
 // TaskFillEpisodes is the scheduled task id declared in the manifest.
+//
+// Silo decides when this runs, not the manifest: a cron field there is ignored,
+// and the schedule comes from a task binding the operator configures. With no
+// binding the host's default trigger is startup-only, so an operator who wants a
+// periodic pass has to set one. The task is written to be safe at any cadence —
+// it is idempotent and never contacts the stream provider.
 const TaskFillEpisodes = "fill-episodes"
 
 // Monitor keeps monitored series complete as new episodes air.

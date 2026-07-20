@@ -36,8 +36,7 @@
       "type": "scheduled_task.v1",
       "id": "fill-episodes",
       "displayName": "Fill new episodes",
-      "cron": "0 */6 * * *",
-      "description": "Writes placeholders for episodes that have aired since the last pass, so tracked shows stay complete without re-requesting them."
+      "description": "Writes placeholders for episodes that have aired since the last pass. Runs at startup by default; set a schedule under the plugin's task settings to have it run periodically."
     }
   ],
   "globalConfigSchema": [
