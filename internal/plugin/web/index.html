@@ -113,6 +113,9 @@
   .tile dd { margin: 0; font: 500 17px/1.1 var(--mono); letter-spacing: -0.01em; }
   .tile dd.ok { color: var(--wisp); }
   .tile dd.bad { color: var(--fault); }
+  .path .name { display: block; color: var(--text); }
+  .path .name .dim { color: var(--faint); font-weight: 400; }
+  .why { display: block; margin-top: 3px; font-size: 11px; color: var(--fault); font-family: var(--mono); }
   .more { margin: 10px 2px 0; font-size: 12px; color: var(--dim); }
   .tile dd small { display: block; font-size: 11px; color: var(--dim); font-weight: 400; letter-spacing: 0; }
   .muted { color: var(--dim); }
@@ -258,11 +261,6 @@
     return `${Math.floor(s / 86400)}d ago`;
   }
 
-  function splitPath(p) {
-    const i = String(p).lastIndexOf("/");
-    return i < 0 ? ["", p] : [p.slice(0, i + 1), p.slice(i + 1)];
-  }
-
   // New episodes arrive without anyone asking, so the one thing worth showing
   // is whether that is still happening. A pass that finds nothing looks exactly
   // like a monitor that never runs, and the difference only surfaces weeks
@@ -302,6 +300,15 @@
     $("version").textContent = s.version ? `v${s.version}` : "";
   }
 
+  // Rows are titles, not files. A single eight-season show is 352
+  // placeholders; listing them made a person read a wall of near-identical
+  // lines to learn one thing — whether the show works.
+  function scopeOf(t) {
+    if (t.media_type !== "series") return t.files > 1 ? `${t.files} versions` : "";
+    const eps = `${t.episodes} episode${t.episodes === 1 ? "" : "s"}`;
+    return t.seasons > 1 ? `${t.seasons} seasons · ${eps}` : eps;
+  }
+
   function renderPlaceholders(rows, total) {
     if (!rows.length) {
       $("placeholders").innerHTML = `
@@ -313,19 +320,26 @@
     }
     $("placeholders").innerHTML = `
       <table>
-        <thead><tr><th>Item</th><th>State</th><th style="text-align:right">Last resolve</th><th style="text-align:right">Plays</th></tr></thead>
-        <tbody>${rows.map((r) => {
-          const [dir, file] = splitPath(r.path);
-          const state = r.last_error ? "fault" : r.last_resolved_at ? "live" : "idle";
-          const label = r.last_error ? "failed" : r.last_resolved_at ? "resolving" : "never played";
+        <thead><tr><th>Title</th><th>State</th><th style="text-align:right">Last played</th><th style="text-align:right">Plays</th></tr></thead>
+        <tbody>${rows.map((t) => {
+          const label = t.state === "fault" ? "failed" : t.state === "live" ? "played" : "never played";
+          const scope = scopeOf(t);
+          // The error text, not just the word "failed" — an operator can act on
+          // "not cached yet" and cannot act on "failed".
+          const why = t.state === "fault" && t.last_error
+            ? `<span class="why">${esc(t.last_error)}</span>` : "";
           return `<tr>
-            <td class="path"><span class="dir">${esc(dir)}</span>${esc(file)}</td>
-            <td><span class="state ${state}">${label}</span></td>
-            <td class="num">${ago(r.last_resolved_at)}</td>
-            <td class="num">${r.plays ?? 0}</td>
+            <td class="path">
+              <span class="name">${esc(t.title)}${t.year ? ` <span class="dim">${t.year}</span>` : ""}</span>
+              ${scope ? `<span class="dir">${esc(scope)}</span>` : ""}
+            </td>
+            <td><span class="state ${t.state}">${label}</span>${why}</td>
+            <td class="num">${ago(t.last_resolved_at)}</td>
+            <td class="num">${t.plays ?? 0}</td>
           </tr>`;
         }).join("")}</tbody>
-      </table>`;
+      </table>
+      ${total > rows.length ? `<p class="more">Showing ${rows.length} of ${total} titles.</p>` : ""}`;
   }
 
   function renderActivity(rows) {

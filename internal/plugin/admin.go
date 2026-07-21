@@ -161,13 +161,13 @@ func (rt *Router) adminStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, status)
 }
 
-// defaultPlaceholderPage bounds how many rows the dashboard is sent.
+// defaultPlaceholderPage bounds how many TITLES the dashboard is sent.
 //
-// The list is unbounded in principle — a library is as large as somebody's
-// appetite — and the dashboard polls. Sending everything meant 143KB per poll
-// at 484 placeholders, which on a real library becomes megabytes a minute for
-// one open tab, spent on rows nobody scrolled to. Fifty is more than fits on a
-// screen; the total still comes back so the page can say what it is showing.
+// Rows are titles rather than files: a single eight-season show is 352
+// placeholders, and listing them meant a wall of near-identical lines a person
+// had to read to learn one thing. The list is still unbounded in principle — a
+// library is as large as somebody's appetite — and the dashboard polls, so it
+// is also capped. The total comes back so the page can say what it is showing.
 const defaultPlaceholderPage = 50
 
 // maxPlaceholderPage caps what a caller may ask for, so a hand-written
@@ -175,7 +175,7 @@ const defaultPlaceholderPage = 50
 const maxPlaceholderPage = 500
 
 func (rt *Router) adminPlaceholders(w http.ResponseWriter, r *http.Request) {
-	all := rt.library.List()
+	all := Summarize(rt.library.List())
 	limit := defaultPlaceholderPage
 	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
 		if n, err := strconv.Atoi(raw); err == nil && n > 0 {
