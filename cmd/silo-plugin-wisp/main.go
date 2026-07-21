@@ -122,7 +122,7 @@ func (s *runtimeServer) Configure(_ context.Context, req *pluginv1.ConfigureRequ
 		// Episode numbering comes from Cinemeta, whose series data is
 		// TVDB-derived, so seasons and episodes line up with what media servers
 		// expect without needing a TVDB key of our own.
-		meta := plugin.NewMetadataAdapter(metadata.New("", nil))
+		meta := plugin.NewMetadataAdapter(metadata.New())
 		s.router.SetIntake(plugin.NewIntake(writer, s.library, meta, s.log).WithIdentityResolver(meta))
 		s.monitor.Set(plugin.NewMonitor(s.library, writer, meta, s.log))
 	} else {

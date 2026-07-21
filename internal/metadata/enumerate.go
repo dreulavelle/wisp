@@ -66,54 +66,6 @@ func (s *Service) ReleasedEpisodes(ctx context.Context, imdbID string, now time.
 	return out, nil
 }
 
-// NextAir returns the earliest episode air time strictly after `after`, so the
-// scheduler can wake near a real airing instead of polling blindly. ok is false
-// when no future air date is known.
-func NextAir(eps []Episode, after time.Time) (t time.Time, ok bool) {
-	for _, e := range eps {
-		if e.Aired.After(after) && (!ok || e.Aired.Before(t)) {
-			t, ok = e.Aired, true
-		}
-	}
-	return t, ok
-}
-
-// MovieReleaseDate returns a movie's home-media release date, preferring TMDB's
-// digital/physical dates and falling back to Cinemeta. It returns
-// ErrNoHomeRelease when TMDB confirms the movie is theatrical-only (so the
-// caller keeps monitoring rather than pinning a cam).
-func (s *Service) MovieReleaseDate(ctx context.Context, imdbID, tmdbID string, now time.Time) (time.Time, error) {
-	imdbOK := strings.HasPrefix(strings.TrimSpace(imdbID), "tt")
-	if s.HasTMDB() && strings.TrimSpace(tmdbID) != "" {
-		release, err := s.MovieHomeRelease(ctx, tmdbID)
-		switch {
-		case err == nil:
-			return release, nil
-		case errors.Is(err, ErrNoHomeRelease):
-			// TMDB answered and the movie is genuinely theatrical-only. This is a
-			// real "not home-released yet" signal, not a call failure — do NOT fall
-			// back to Cinemeta's theatrical/general date (which would pin a cam).
-			return time.Time{}, err
-		case !imdbOK:
-			// The TMDB call failed but there's no Cinemeta fallback available (no
-			// imdb id) — surface the real error so the monitor retries.
-			return time.Time{}, err
-		default:
-			// The TMDB *call* failed (auth 401/403, network, 5xx, decode). A bad or
-			// expired key must behave no worse than no key configured: fall back to
-			// Cinemeta so one broken key doesn't block every movie behind it.
-			s.tmdbFallbackWarn.Do(func() {
-				s.log.Warn("TMDB release lookup failed; falling back to Cinemeta (check WISP_TMDB_API_KEY)", "error", err)
-			})
-			// fall through to the Cinemeta path below
-		}
-	}
-	if imdbOK {
-		return s.cinemetaMovieReleased(ctx, imdbID, now)
-	}
-	return time.Time{}, fmt.Errorf("metadata: no release-date source (need TMDB key or imdb id)")
-}
-
 // enrichAirDates overwrites Cinemeta's canonical air dates with TVmaze's more
 // precise airstamps, but only when they corroborate within airDateTolerance —
 // so a shared (season, number) key across diverged season layouts can't graft a

@@ -1,37 +1,40 @@
-
-*~
-# ── Build artifacts ─────────────────────────────────────────────────────────
-coverage.*
+# ── Secrets: never commit real env or credential files ─────────────────────
+.env
+.env.*
+!.env.example
+secrets.*
 credentials.*
+*.key
+*.pem
 *.crt
+*_rsa
+*_ed25519
+
+# ── Build artifacts ────────────────────────────────────────────────────────
+/dist/
+/wisp
+silo-plugin-wisp
+*.exe
+*.out
+*.test
+coverage.*
+
+# ── Test scratch: written by test/e2e/run.sh, never committed ──────────────
+repository.e2e.json
+test/e2e/library/
+test/e2e/stub-bin
+
+# ── Runtime data ───────────────────────────────────────────────────────────
 /data/
 *.db
 *.db-shm
 *.db-wal
-/dist/
-dist/
-.DS_Store
-*_ed25519
-# ── Editor / OS cruft ───────────────────────────────────────────────────────
-.env
-.env.*
-!.env.example
-*.exe
+
+# ── Editor / OS cruft ──────────────────────────────────────────────────────
 .idea/
-*.key
-*.out
-*.pem
-repository.e2e.json
-*_rsa
-# ── Runtime data (pin + monitor database) ───────────────────────────────────
-secrets.*
-# ── Secrets: never commit real env or credential files ──────────────────────
-silo-plugin-wisp
-*.swo
-*.swp
-*.test
-test/e2e/library/
-test/e2e/stub-bin
-Thumbs.db
 .vscode/
-/wisp
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db

@@ -2,10 +2,7 @@ package metadata
 
 import (
 	"context"
-	"fmt"
 	"net/url"
-	"strconv"
-	"strings"
 	"time"
 )
 
@@ -47,33 +44,4 @@ func (s *Service) cinemetaEpisodes(ctx context.Context, imdbID string) ([]Episod
 		eps = append(eps, Episode{Season: v.Season, Number: number, Aired: aired})
 	}
 	return eps, nil
-}
-
-// cinemetaMovieReleased returns a movie's release date from Cinemeta, falling
-// back to a past release year when only that is known.
-func (s *Service) cinemetaMovieReleased(ctx context.Context, imdbID string, now time.Time) (time.Time, error) {
-	var payload struct {
-		Meta struct {
-			Released    *time.Time `json:"released"`
-			ReleaseInfo string     `json:"releaseInfo"`
-			Year        string     `json:"year"`
-		} `json:"meta"`
-	}
-	endpoint := s.cinemetaBase + "/meta/movie/" + url.PathEscape(imdbID) + ".json"
-	if err := s.getJSON(ctx, endpoint, &payload, nil); err != nil {
-		return time.Time{}, err
-	}
-	if payload.Meta.Released != nil && !payload.Meta.Released.IsZero() {
-		return *payload.Meta.Released, nil
-	}
-	for _, v := range []string{payload.Meta.ReleaseInfo, payload.Meta.Year} {
-		v = strings.TrimSpace(v)
-		if len(v) < 4 {
-			continue
-		}
-		if year, err := strconv.Atoi(v[:4]); err == nil && year > 0 && year < now.Year() {
-			return time.Date(year, time.January, 1, 0, 0, 0, 0, time.UTC), nil
-		}
-	}
-	return time.Time{}, fmt.Errorf("cinemeta: no release date for %s", imdbID)
 }
