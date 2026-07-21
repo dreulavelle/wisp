@@ -429,6 +429,430 @@ func TestResolveTracedSeparatesSearchFromVerification(t *testing.T) {
 	}
 }
 
+// A playback session is not one resolution: the media server re-resolves the
+// placeholder on every ffmpeg restart — every seek at minimum. Within the reuse
+// window that storm must cost a map lookup, not a search and a probe pass.
+func TestResolveReusesARecentAnswer(t *testing.T) {
+	stub := &stubSearcher{streams: []aiostreams.Stream{
+		{URL: "https://cdn.example.invalid/a.mkv", Resolution: "1080p"},
+	}}
+	var probes atomic.Int32
+	r := NewResolver(stub)
+	r.live = func(context.Context, string) error { probes.Add(1); return nil }
+
+	req := ResolveRequest{MediaType: "movie", IMDbID: "tt1", Quality: "1080p"}
+	first, trace, err := r.ResolveTraced(context.Background(), req)
+	if err != nil {
+		t.Fatalf("first ResolveTraced() error = %v", err)
+	}
+	if trace.Reused {
+		t.Error("first resolution reported itself as reused")
+	}
+
+	second, trace, err := r.ResolveTraced(context.Background(), req)
+	if err != nil {
+		t.Fatalf("second ResolveTraced() error = %v", err)
+	}
+	if !trace.Reused {
+		t.Error("second resolution within the window was not reused")
+	}
+	if second.URL != first.URL {
+		t.Errorf("reused URL = %q, want %q", second.URL, first.URL)
+	}
+	if stub.calls != 1 {
+		t.Errorf("search ran %d times, want once", stub.calls)
+	}
+	if got := probes.Load(); got != 1 {
+		t.Errorf("probe ran %d times, want once", got)
+	}
+}
+
+// Reuse is seek-storm absorption, not storage. Once the window passes, the next
+// caller resolves fresh.
+func TestResolveReuseExpires(t *testing.T) {
+	stub := &stubSearcher{streams: []aiostreams.Stream{
+		{URL: "https://cdn.example.invalid/a.mkv", Resolution: "1080p"},
+	}}
+	r := alwaysLive(NewResolver(stub))
+	current := time.Now()
+	r.now = func() time.Time { return current }
+
+	req := ResolveRequest{MediaType: "movie", IMDbID: "tt1", Quality: "1080p"}
+	if _, _, err := r.ResolveTraced(context.Background(), req); err != nil {
+		t.Fatalf("first ResolveTraced() error = %v", err)
+	}
+
+	current = current.Add(resolvedTTL + time.Second)
+	_, trace, err := r.ResolveTraced(context.Background(), req)
+	if err != nil {
+		t.Fatalf("second ResolveTraced() error = %v", err)
+	}
+	if trace.Reused {
+		t.Error("an expired answer was reused")
+	}
+	if stub.calls != 2 {
+		t.Errorf("search ran %d times, want a fresh search after expiry", stub.calls)
+	}
+}
+
+// A caller that just watched the issued URL fail must not be handed the same
+// answer back from the window.
+func TestResolveFreshBypassesReuse(t *testing.T) {
+	stub := &stubSearcher{streams: []aiostreams.Stream{
+		{URL: "https://cdn.example.invalid/a.mkv", Resolution: "1080p"},
+	}}
+	r := alwaysLive(NewResolver(stub))
+
+	req := ResolveRequest{MediaType: "movie", IMDbID: "tt1", Quality: "1080p"}
+	if _, _, err := r.ResolveTraced(context.Background(), req); err != nil {
+		t.Fatalf("first ResolveTraced() error = %v", err)
+	}
+
+	req.Fresh = true
+	_, trace, err := r.ResolveTraced(context.Background(), req)
+	if err != nil {
+		t.Fatalf("fresh ResolveTraced() error = %v", err)
+	}
+	if trace.Reused {
+		t.Error("Fresh was answered from the reuse window")
+	}
+	if stub.calls != 2 {
+		t.Errorf("search ran %d times, want Fresh to force a second", stub.calls)
+	}
+}
+
+// gatedSearcher blocks inside Search until released, so a test can pile up
+// concurrent callers on one in-flight resolution.
+type gatedSearcher struct {
+	release chan struct{}
+	calls   atomic.Int32
+	streams []aiostreams.Stream
+}
+
+func (g *gatedSearcher) Search(ctx context.Context, _, _ string, _, _ int) ([]aiostreams.Stream, error) {
+	g.calls.Add(1)
+	select {
+	case <-g.release:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	return g.streams, nil
+}
+
+// Concurrent resolves for the same unit share one resolution rather than each
+// paying — and charging the provider for — their own.
+func TestResolveCoalescesConcurrentCallers(t *testing.T) {
+	gate := &gatedSearcher{
+		release: make(chan struct{}),
+		streams: []aiostreams.Stream{{URL: "https://cdn.example.invalid/a.mkv", Resolution: "1080p"}},
+	}
+	r := alwaysLive(NewResolver(gate))
+	req := ResolveRequest{MediaType: "movie", IMDbID: "tt1", Quality: "1080p"}
+
+	const callers = 5
+	results := make(chan error, callers)
+	for i := 0; i < callers; i++ {
+		go func() {
+			_, _, err := r.ResolveTraced(context.Background(), req)
+			results <- err
+		}()
+	}
+	// Let the followers queue up behind the leader before releasing it. The
+	// sleep only risks releasing early, which would still pass via the reuse
+	// window — the assertion that matters is the single search call.
+	time.Sleep(50 * time.Millisecond)
+	close(gate.release)
+	for i := 0; i < callers; i++ {
+		if err := <-results; err != nil {
+			t.Fatalf("caller %d: %v", i, err)
+		}
+	}
+	if got := gate.calls.Load(); got != 1 {
+		t.Errorf("search ran %d times for %d concurrent callers, want once", got, callers)
+	}
+}
+
+// The caller who happened to arrive first is not special: its client hanging
+// up must not hand a context error to every healthy caller coalesced onto the
+// same resolution.
+func TestResolveLeaderCancellationDoesNotPoisonFollowers(t *testing.T) {
+	gate := &gatedSearcher{
+		release: make(chan struct{}),
+		streams: []aiostreams.Stream{{URL: "https://cdn.example.invalid/a.mkv", Resolution: "1080p"}},
+	}
+	r := alwaysLive(NewResolver(gate))
+	req := ResolveRequest{MediaType: "movie", IMDbID: "tt1", Quality: "1080p"}
+
+	leaderCtx, cancelLeader := context.WithCancel(context.Background())
+	leaderDone := make(chan error, 1)
+	go func() {
+		_, _, err := r.ResolveTraced(leaderCtx, req)
+		leaderDone <- err
+	}()
+	for gate.calls.Load() == 0 {
+		time.Sleep(time.Millisecond)
+	}
+
+	followerDone := make(chan error, 1)
+	go func() {
+		_, _, err := r.ResolveTraced(context.Background(), req)
+		followerDone <- err
+	}()
+
+	cancelLeader()
+	if err := <-leaderDone; !errors.Is(err, context.Canceled) {
+		t.Errorf("leader error = %v, want its own cancellation", err)
+	}
+	close(gate.release)
+	if err := <-followerDone; err != nil {
+		t.Errorf("follower error = %v, want the flight to survive the leader leaving", err)
+	}
+}
+
+// Failures are not reused: the next caller gets a fresh attempt, not a replay
+// of the last one's bad luck.
+func TestResolveDoesNotReuseFailures(t *testing.T) {
+	stub := &stubSearcher{err: errors.New("upstream down")}
+	r := alwaysLive(NewResolver(stub))
+
+	req := ResolveRequest{MediaType: "movie", IMDbID: "tt1"}
+	if _, _, err := r.ResolveTraced(context.Background(), req); err == nil {
+		t.Fatal("expected the first attempt to fail")
+	}
+	stub.err = nil
+	stub.streams = []aiostreams.Stream{{URL: "https://cdn.example.invalid/a.mkv", Resolution: "1080p"}}
+	if _, _, err := r.ResolveTraced(context.Background(), req); err != nil {
+		t.Fatalf("second attempt error = %v, want the failure not to be replayed", err)
+	}
+	if stub.calls != 2 {
+		t.Errorf("search ran %d times, want 2", stub.calls)
+	}
+}
+
+// A candidate that failed its check seconds ago is still dead: it must be
+// skipped on remembered evidence rather than charged its timeout again.
+func TestResolveRemembersProbeFailures(t *testing.T) {
+	stub := &stubSearcher{streams: []aiostreams.Stream{
+		{URL: "https://cdn.example.invalid/dead.mkv", Resolution: "1080p"},
+		{URL: "https://cdn.example.invalid/live.mkv", Resolution: "1080p"},
+	}}
+	deadProbes := 0
+	r := NewResolver(stub)
+	current := time.Now()
+	r.now = func() time.Time { return current }
+	r.live = func(_ context.Context, u string) error {
+		if strings.Contains(u, "dead") {
+			deadProbes++
+			return errors.New("not serving")
+		}
+		return nil
+	}
+
+	req := ResolveRequest{MediaType: "movie", IMDbID: "tt1", Quality: "1080p"}
+	if _, _, err := r.ResolveTraced(context.Background(), req); err != nil {
+		t.Fatalf("first ResolveTraced() error = %v", err)
+	}
+
+	// Past the reuse window but inside the probe-failure window: the resolve
+	// runs again, and the dead candidate must be skipped without a probe.
+	current = current.Add(resolvedTTL + time.Second)
+	got, _, err := r.ResolveTraced(context.Background(), req)
+	if err != nil {
+		t.Fatalf("second ResolveTraced() error = %v", err)
+	}
+	if got.URL != "https://cdn.example.invalid/live.mkv" {
+		t.Errorf("URL = %q, want the serving candidate", got.URL)
+	}
+	if deadProbes != 1 {
+		t.Errorf("dead candidate probed %d times, want once", deadProbes)
+	}
+
+	// Fresh demands the re-probe: remembered evidence is exactly what a caller
+	// reporting a failure wants re-examined.
+	req.Fresh = true
+	if _, _, err := r.ResolveTraced(context.Background(), req); err != nil {
+		t.Fatalf("fresh ResolveTraced() error = %v", err)
+	}
+	if deadProbes != 2 {
+		t.Errorf("dead candidate probed %d times after Fresh, want 2", deadProbes)
+	}
+}
+
+// A remembered failure must not refresh its own expiry, or one observation
+// would blacklist a candidate forever.
+func TestRememberedProbeFailureExpires(t *testing.T) {
+	stub := &stubSearcher{streams: []aiostreams.Stream{
+		{URL: "https://cdn.example.invalid/dead.mkv", Resolution: "1080p"},
+		{URL: "https://cdn.example.invalid/live.mkv", Resolution: "1080p"},
+	}}
+	deadProbes := 0
+	r := NewResolver(stub)
+	current := time.Now()
+	r.now = func() time.Time { return current }
+	r.live = func(_ context.Context, u string) error {
+		if strings.Contains(u, "dead") {
+			deadProbes++
+			return errors.New("not serving")
+		}
+		return nil
+	}
+
+	req := ResolveRequest{MediaType: "movie", IMDbID: "tt1", Quality: "1080p"}
+	if _, _, err := r.ResolveTraced(context.Background(), req); err != nil {
+		t.Fatalf("first ResolveTraced() error = %v", err)
+	}
+	// A resolve inside the failure window skips the dead candidate — and must
+	// not push its expiry out.
+	current = current.Add(resolvedTTL + time.Second)
+	if _, _, err := r.ResolveTraced(context.Background(), req); err != nil {
+		t.Fatalf("second ResolveTraced() error = %v", err)
+	}
+	// Past the original failure window, the candidate deserves a real check.
+	current = current.Add(probeFailTTL)
+	if _, _, err := r.ResolveTraced(context.Background(), req); err != nil {
+		t.Fatalf("third ResolveTraced() error = %v", err)
+	}
+	if deadProbes != 2 {
+		t.Errorf("dead candidate probed %d times, want a re-probe after expiry", deadProbes)
+	}
+}
+
+// freshCountingSearcher records which search entry point was used.
+type freshCountingSearcher struct {
+	stubSearcher
+	freshCalls int
+}
+
+func (f *freshCountingSearcher) SearchFresh(ctx context.Context, mediaType, imdbID string, season, episode int) ([]aiostreams.Stream, error) {
+	f.freshCalls++
+	return f.stubSearcher.Search(ctx, mediaType, imdbID, season, episode)
+}
+
+// A Fresh resolution exists because a previously-issued URL just failed. When
+// the searcher can bypass its own result cache, Fresh must take that path —
+// the cached result set is what produced the dead URL.
+func TestResolveFreshBypassesTheSearchCacheToo(t *testing.T) {
+	stub := &freshCountingSearcher{stubSearcher: stubSearcher{streams: []aiostreams.Stream{
+		{URL: "https://cdn.example.invalid/a.mkv", Resolution: "1080p"},
+	}}}
+	r := alwaysLive(NewResolver(stub))
+
+	req := ResolveRequest{MediaType: "movie", IMDbID: "tt1", Quality: "1080p"}
+	if _, _, err := r.ResolveTraced(context.Background(), req); err != nil {
+		t.Fatalf("ResolveTraced() error = %v", err)
+	}
+	if stub.freshCalls != 0 {
+		t.Errorf("plain resolve used SearchFresh %d times, want 0", stub.freshCalls)
+	}
+
+	req.Fresh = true
+	if _, _, err := r.ResolveTraced(context.Background(), req); err != nil {
+		t.Fatalf("fresh ResolveTraced() error = %v", err)
+	}
+	if stub.freshCalls != 1 {
+		t.Errorf("Fresh used SearchFresh %d times, want 1", stub.freshCalls)
+	}
+}
+
+// gatedFreshSearcher gates ordinary Search but answers SearchFresh
+// immediately, so a test can hold an ordinary flight open while a Fresh caller
+// resolves past it.
+type gatedFreshSearcher struct {
+	gatedSearcher
+	freshCalls atomic.Int32
+}
+
+func (g *gatedFreshSearcher) SearchFresh(context.Context, string, string, int, int) ([]aiostreams.Stream, error) {
+	g.freshCalls.Add(1)
+	return g.streams, nil
+}
+
+// A Fresh caller exists because a URL just failed. Riding an ordinary flight —
+// which may be about to re-serve exactly that URL from a cache — would defeat
+// the point; Fresh leads its own fully-fresh resolution instead.
+func TestFreshDoesNotJoinAnOrdinaryFlight(t *testing.T) {
+	gate := &gatedFreshSearcher{gatedSearcher: gatedSearcher{
+		release: make(chan struct{}),
+		streams: []aiostreams.Stream{{URL: "https://cdn.example.invalid/a.mkv", Resolution: "1080p"}},
+	}}
+	r := alwaysLive(NewResolver(gate))
+	req := ResolveRequest{MediaType: "movie", IMDbID: "tt1", Quality: "1080p"}
+
+	ordinaryDone := make(chan error, 1)
+	go func() {
+		_, _, err := r.ResolveTraced(context.Background(), req)
+		ordinaryDone <- err
+	}()
+	for gate.calls.Load() == 0 {
+		time.Sleep(time.Millisecond)
+	}
+
+	// The ordinary flight is still in the air; Fresh must not wait on it.
+	fresh := req
+	fresh.Fresh = true
+	if _, _, err := r.ResolveTraced(context.Background(), fresh); err != nil {
+		t.Fatalf("fresh ResolveTraced() error = %v", err)
+	}
+	if got := gate.freshCalls.Load(); got != 1 {
+		t.Errorf("SearchFresh ran %d times, want the fresh caller to lead its own flight", got)
+	}
+
+	close(gate.release)
+	if err := <-ordinaryDone; err != nil {
+		t.Errorf("ordinary caller error = %v, want it unaffected", err)
+	}
+}
+
+// A provider that has finished fetching must not stay blacklisted: a probe
+// success clears the remembered failure immediately, not at its expiry.
+func TestProbeSuccessClearsRememberedFailure(t *testing.T) {
+	stub := &stubSearcher{streams: []aiostreams.Stream{
+		{URL: "https://cdn.example.invalid/flaky.mkv", Resolution: "1080p"},
+		{URL: "https://cdn.example.invalid/steady.mkv", Resolution: "1080p"},
+	}}
+	flakyDown := true
+	flakyProbes := 0
+	r := NewResolver(stub)
+	current := time.Now()
+	r.now = func() time.Time { return current }
+	r.live = func(_ context.Context, u string) error {
+		if strings.Contains(u, "flaky") {
+			flakyProbes++
+			if flakyDown {
+				return errors.New("not serving")
+			}
+		}
+		return nil
+	}
+
+	req := ResolveRequest{MediaType: "movie", IMDbID: "tt1", Quality: "1080p"}
+	got, _, err := r.ResolveTraced(context.Background(), req)
+	if err != nil || got.URL != "https://cdn.example.invalid/steady.mkv" {
+		t.Fatalf("first resolve = %q (%v), want the steady candidate", got.URL, err)
+	}
+
+	// The provider finishes fetching; a Fresh resolve re-examines and clears
+	// the remembered failure.
+	flakyDown = false
+	fresh := req
+	fresh.Fresh = true
+	got, _, err = r.ResolveTraced(context.Background(), fresh)
+	if err != nil || got.URL != "https://cdn.example.invalid/flaky.mkv" {
+		t.Fatalf("fresh resolve = %q (%v), want the recovered candidate", got.URL, err)
+	}
+
+	// An ordinary resolve after the reuse window must probe the recovered
+	// candidate rather than skip it on the stale memory.
+	current = current.Add(resolvedTTL + time.Second)
+	got, _, err = r.ResolveTraced(context.Background(), req)
+	if err != nil || got.URL != "https://cdn.example.invalid/flaky.mkv" {
+		t.Fatalf("third resolve = %q (%v), want the recovered candidate", got.URL, err)
+	}
+	if flakyProbes != 3 {
+		t.Errorf("recovered candidate probed %d times, want 3 (fail, fresh success, ordinary success)", flakyProbes)
+	}
+}
+
 // A failure still reports where the time went — that is when it matters most.
 func TestResolveTracedReportsTimingOnFailure(t *testing.T) {
 	r := NewResolver(&stubSearcher{err: errors.New("upstream down")})

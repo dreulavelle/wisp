@@ -142,6 +142,11 @@ func (rt *Router) handleResolve(w http.ResponseWriter, r *http.Request) {
 	if imdb := strings.TrimSpace(r.URL.Query().Get("imdb")); imdb != "" {
 		req.IMDbID = imdb
 	}
+	// fresh=1 is for a caller that just watched the previously-issued URL fail:
+	// it bypasses the resolver's short reuse window so the retry cannot be
+	// handed the same dead link back. Placeholders never carry it — it is
+	// appended by the media server's failure-recovery path.
+	req.Fresh = r.URL.Query().Get("fresh") == "1"
 
 	// Authenticate before doing any upstream work. An unsigned request must
 	// cost nothing: otherwise the public route becomes a way to drive load
@@ -187,6 +192,7 @@ func (rt *Router) handleResolve(w http.ResponseWriter, r *http.Request) {
 		Quality:  stream.Resolution,
 		SearchMS: trace.SearchMS, VerifyMS: trace.VerifyMS,
 		TotalMS: elapsed.Milliseconds(),
+		Reused:  trace.Reused,
 	})
 	rt.library.MarkResolved(req.ID, req.Season, req.Episode)
 
@@ -194,6 +200,7 @@ func (rt *Router) handleResolve(w http.ResponseWriter, r *http.Request) {
 		"media_type", req.MediaType, "id", req.ID.String(),
 		"season", req.Season, "episode", req.Episode,
 		"requested_quality", req.Quality, "served_quality", stream.Resolution,
+		"reused", trace.Reused,
 		"elapsed_ms", elapsed.Milliseconds())
 
 	// Never cacheable: the target is short-lived, and a cached redirect would

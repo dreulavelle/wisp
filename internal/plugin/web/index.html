@@ -227,8 +227,7 @@
       <div id="activity"></div>
       <div class="key">
         <span><i style="background:var(--cold)"></i> search</span>
-        <span><i style="background:var(--wisp-dim)"></i> select</span>
-        <span><i style="background:var(--wisp)"></i> redirect</span>
+        <span><i style="background:var(--wisp-dim)"></i> verify</span>
       </div>
     </section>
 
@@ -253,15 +252,6 @@
   const $ = (id) => document.getElementById(id);
   const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
   const ms = (n) => (n == null ? "—" : n < 1000 ? `${Math.round(n)}ms` : `${(n / 1000).toFixed(2)}s`);
-
-  function ago(iso) {
-    if (!iso) return "never";
-    const s = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000);
-    if (s < 60) return `${Math.floor(s)}s ago`;
-    if (s < 3600) return `${Math.floor(s / 60)}m ago`;
-    if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
-    return `${Math.floor(s / 86400)}d ago`;
-  }
 
   // New episodes arrive without anyone asking, so the one thing worth showing
   // is whether that is still happening. A pass that finds nothing looks exactly
@@ -295,7 +285,7 @@
       ["Resolver", healthy ? `<span class="ok">ready</span>` : `<span class="bad">not configured</span>`],
       ["Placeholders", `${s.placeholders ?? 0}`],
       newEpisodesTile(s.monitor),
-      ["Resolved", `${s.resolved_total ?? 0}`],
+      ["Resolved", `${s.resolved_total ?? 0}${s.reused_total ? `<small>${s.reused_total} reused</small>` : ""}`],
       ["Median resolve", ms(s.median_resolve_ms)],
       ["Failures", `${s.failures_total ?? 0}`],
     ].map(([k, v]) => `<div class="tile"><dt>${k}</dt><dd>${v}</dd></div>`).join("");
@@ -356,10 +346,15 @@
     $("activity").innerHTML = `<div class="trace">${rows.map((r) => {
       const total = Math.max(1, r.total_ms || 0);
       const seg = (k, v) => `<div class="seg ${k}" style="width:${((v || 0) / total) * 100}%"></div>`;
+      // A reused answer did no work, so drawing it a latency bar would be a
+      // lie; it gets the word instead.
+      const cost = r.reused
+        ? `<span class="total">reused</span>`
+        : `<span class="total ${total > 10000 ? "slow" : ""}">${ms(total)}</span>`;
       return `<div class="hop">
         <span class="title">${esc(r.title || r.imdb_id || "unknown")}</span>
-        <span class="total ${total > 10000 ? "slow" : ""}">${ms(total)}</span>
-        <div class="bar">${seg("search", r.search_ms)}${seg("verify", r.verify_ms)}</div>
+        ${cost}
+        <div class="bar">${r.reused ? "" : seg("search", r.search_ms) + seg("verify", r.verify_ms)}</div>
         <span class="legend">${esc(r.quality || "—")} &middot; ${ago(r.at)}${r.error ? ` &middot; ${esc(r.error)}` : ""}</span>
       </div>`;
     }).join("")}</div>`;
