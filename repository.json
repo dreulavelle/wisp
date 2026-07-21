@@ -3,7 +3,7 @@
     {
       "manifest": {
         "plugin_id": "wisp",
-        "version": "3.0.0",
+        "version": "3.1.0",
         "silo_api_version": "v1",
         "category": "Video/Wisp",
         "supported_platforms": [
@@ -109,12 +109,12 @@
       "repo_url": "https://github.com/dreulavelle/wisp",
       "binaries": {
         "linux/amd64": {
-          "url": "https://github.com/dreulavelle/wisp/releases/download/v3.0.0/silo-plugin-wisp-linux-amd64",
-          "checksum": "0959853ebd012427b4eac455af5b335b4503e22bfed76cf7d34ae200c03bd1fd"
+          "url": "https://github.com/dreulavelle/wisp/releases/download/v3.1.0/silo-plugin-wisp-linux-amd64",
+          "checksum": "4f19381e1e354f9de5f8158b61822eccfe46df7067a5b631f6c54c3db8108ef5"
         },
         "linux/arm64": {
-          "url": "https://github.com/dreulavelle/wisp/releases/download/v3.0.0/silo-plugin-wisp-linux-arm64",
-          "checksum": "8aa4678859274098b601050b219de73a0552ba07882f808cf3765b4b347200cc"
+          "url": "https://github.com/dreulavelle/wisp/releases/download/v3.1.0/silo-plugin-wisp-linux-arm64",
+          "checksum": "f2976ea342b7f8229613e40b8052dd6114ff044cae3836f38dff94e6a6ddac7c"
         }
       }
     }
