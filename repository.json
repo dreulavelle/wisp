@@ -3,7 +3,7 @@
     {
       "manifest": {
         "plugin_id": "wisp",
-        "version": "2.1.0",
+        "version": "3.0.0",
         "silo_api_version": "v1",
         "category": "Video/Wisp",
         "supported_platforms": [
@@ -45,7 +45,7 @@
         "global_config_schema": [
           {
             "key": "global",
-            "json_schema": "{\"type\":\"object\",\"properties\":{\"aiostreams_url\":{\"type\":\"string\",\"title\":\"AIOStreams URL\"},\"aiostreams_password\":{\"type\":\"string\",\"title\":\"AIOStreams Password\"},\"library_path\":{\"type\":\"string\",\"title\":\"Library Path\"}},\"required\":[\"aiostreams_url\",\"library_path\"]}",
+            "json_schema": "{\"type\":\"object\",\"properties\":{\"aiostreams_url\":{\"type\":\"string\",\"title\":\"AIOStreams URL\"},\"library_path\":{\"type\":\"string\",\"title\":\"Library Path\"}},\"required\":[\"aiostreams_url\",\"library_path\"]}",
             "admin_form": {
               "submit_label": "Save Wisp settings",
               "fields": [
@@ -54,15 +54,8 @@
                   "label": "AIOStreams URL",
                   "control": 1,
                   "required": true,
-                  "description": "Full AIOStreams manifest URL, copied from its configure page. Example: https://aiostreams.example.com/stremio/<uuid>/manifest.json",
-                  "placeholder": "https://aiostreams.example.com/stremio/<uuid>/manifest.json"
-                },
-                {
-                  "key": "aiostreams_password",
-                  "label": "AIOStreams Password",
-                  "control": 3,
-                  "secret": true,
-                  "description": "Password for the AIOStreams instance. Leave empty if it needs none."
+                  "description": "Your full AIOStreams manifest URL, copied from its configure page. It carries everything Wisp needs \u2014 there is no password to set. Must be the full form containing your configuration.",
+                  "placeholder": "https://aiostreams.example.com/stremio/<uuid>/<config>/manifest.json"
                 },
                 {
                   "key": "library_path",
@@ -116,12 +109,12 @@
       "repo_url": "https://github.com/dreulavelle/wisp",
       "binaries": {
         "linux/amd64": {
-          "url": "https://github.com/dreulavelle/wisp/releases/download/v2.1.0/silo-plugin-wisp-linux-amd64",
-          "checksum": "643a7cabc001032042780353b96a081a2661c5c68497b6f4c109590e35968f98"
+          "url": "https://github.com/dreulavelle/wisp/releases/download/v3.0.0/silo-plugin-wisp-linux-amd64",
+          "checksum": "0959853ebd012427b4eac455af5b335b4503e22bfed76cf7d34ae200c03bd1fd"
         },
         "linux/arm64": {
-          "url": "https://github.com/dreulavelle/wisp/releases/download/v2.1.0/silo-plugin-wisp-linux-arm64",
-          "checksum": "d7cf6abd4d20163d303a6eb43ed80f7814e7ba6067e2df877cd6afaf5c60120a"
+          "url": "https://github.com/dreulavelle/wisp/releases/download/v3.0.0/silo-plugin-wisp-linux-arm64",
+          "checksum": "8aa4678859274098b601050b219de73a0552ba07882f808cf3765b4b347200cc"
         }
       }
     }
