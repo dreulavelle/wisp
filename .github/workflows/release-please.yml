@@ -85,5 +85,14 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add repository.json
           git diff --cached --quiet && { echo "unchanged"; exit 0; }
-          git commit -m "chore(release): catalog feed for ${{ steps.v.outputs.tag }}"
+          # [skip ci] matters more than it looks. Without it this push starts
+          # another release-please run, and it lands in the window where the
+          # release it is meant to describe has only just stopped being a
+          # draft. Finding no published release to anchor on, release-please
+          # walks the history to the beginning and proposes a major version
+          # built from every breaking change the project has ever had. That
+          # phantom PR then has to be recognised and closed by hand after
+          # every single release. The commit carries a generated file that no
+          # workflow needs to see, so skipping is free.
+          git commit -m "chore(release): catalog feed for ${{ steps.v.outputs.tag }} [skip ci]"
           git push origin HEAD:main
