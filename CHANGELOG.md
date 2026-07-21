@@ -1,5 +1,27 @@
 # Changelog
 
+## [3.1.0](https://github.com/dreulavelle/wisp/compare/v3.0.0...v3.1.0) (2026-07-21)
+
+
+### Features
+
+* **admin:** show titles on the dashboard instead of files ([56621ee](https://github.com/dreulavelle/wisp/commit/56621ee41b4014bba7d0b0eb57b408511d3b51ae))
+* **admin:** show where a resolve actually spent its time ([1de0926](https://github.com/dreulavelle/wisp/commit/1de0926c344c5646213392fdb37ea1f563901578))
+* **plugin:** tell Silo about new placeholders instead of waiting to be polled ([4b15f91](https://github.com/dreulavelle/wisp/commit/4b15f91ef1081048e9e74f3900ae4164450d402c))
+
+
+### Bug Fixes
+
+* **plugin:** make the episode monitor actually run ([eaa8901](https://github.com/dreulavelle/wisp/commit/eaa890197489d3fb6c96392cc628751a410c9eb3))
+* **plugin:** only hand back a stream that is actually serving ([73be98c](https://github.com/dreulavelle/wisp/commit/73be98c889d82fa87d65807c413a54f44e02a8a4))
+* **plugin:** refuse to create a library root that does not exist ([a7bf64e](https://github.com/dreulavelle/wisp/commit/a7bf64e0b91384c5cabefa053c1133b82cb959ac))
+
+
+### Performance
+
+* **admin:** stop re-fetching the whole library every five seconds ([55545d2](https://github.com/dreulavelle/wisp/commit/55545d2d9ca1be506abe15b69bc58b7bdda8849f))
+* **plugin:** answer a playback session's re-resolve storm from memory ([ebaf1e8](https://github.com/dreulavelle/wisp/commit/ebaf1e838221c170ca2a2eca84621dfb0e0c91af))
+
 ## [3.0.0](https://github.com/dreulavelle/wisp/compare/v2.1.0...v3.0.0) (2026-07-21)
 
 
