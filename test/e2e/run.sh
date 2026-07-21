@@ -222,6 +222,18 @@ except Exception: print("")' 2>/dev/null)"
       docker logs "$CID" 2>&1 | grep -iE "plugin|wisp" | tail -8 | sed 's/^/        /'
     fi
     RESOLVER_BASE="http://127.0.0.1:8080/api/v1/plugins/$INSTALL_ID"
+
+    # The plugin has to work out its OWN installation id: Silo mounts routes at
+    # /api/v1/plugins/<id>/ but tells the plugin neither the id nor the prefix.
+    # Get this wrong and every placeholder 404s at playback, long after the
+    # mistake. Assert it derived the same id Silo actually installed it under —
+    # and specifically that it is not the hardcoded fallback of 1.
+    CHOSE="$(docker logs "$CID" 2>&1 | grep -o 'resolver_base=[^ ]*' | tail -1 | cut -d= -f2-)"
+    if [[ "$CHOSE" == "$RESOLVER_BASE" ]]; then
+      pass "plugin discovered its own installation id ($INSTALL_ID)"
+    else
+      fail "plugin addressed itself at ${CHOSE:-<nothing logged>}, want $RESOLVER_BASE"
+    fi
   fi
 fi
 
