@@ -113,6 +113,7 @@
   .tile dd { margin: 0; font: 500 17px/1.1 var(--mono); letter-spacing: -0.01em; }
   .tile dd.ok { color: var(--wisp); }
   .tile dd.bad { color: var(--fault); }
+  .more { margin: 10px 2px 0; font-size: 12px; color: var(--dim); }
   .tile dd small { display: block; font-size: 11px; color: var(--dim); font-weight: 400; letter-spacing: 0; }
   .muted { color: var(--dim); }
 
@@ -301,7 +302,7 @@
     $("version").textContent = s.version ? `v${s.version}` : "";
   }
 
-  function renderPlaceholders(rows) {
+  function renderPlaceholders(rows, total) {
     if (!rows.length) {
       $("placeholders").innerHTML = `
         <div class="empty">
@@ -371,20 +372,53 @@
       row("Default quality", s.default_quality, "any");
   }
 
-  async function refresh() {
-    const [status, placeholders, activity, settings] = await Promise.all([
-      api("/status").catch(() => ({})),
-      api("/placeholders").catch(() => []),
-      api("/activity").catch(() => []),
-      api("/settings").catch(() => ({})),
-    ]);
+  // Two cadences, because the payloads differ by orders of magnitude. Status
+  // is a handful of numbers and worth watching closely; the lists are the
+  // expensive part and change far more slowly than every five seconds. Polling
+  // both together meant re-fetching the whole library twelve times a minute for
+  // rows nobody had scrolled to.
+  const FAST_MS = 5000;   // status tiles
+  const SLOW_MS = 20000;  // placeholders, activity, settings
+
+  async function refreshStatus() {
+    const status = await api("/status").catch(() => ({}));
     renderTiles(status);
     renderSetupNotice(status);
-    renderPlaceholders(placeholders.items || placeholders || []);
+  }
+
+  async function refreshLists() {
+    const [placeholders, activity, settings] = await Promise.all([
+      api("/placeholders").catch(() => ({})),
+      api("/activity").catch(() => ({})),
+      api("/settings").catch(() => ({})),
+    ]);
+    renderPlaceholders(placeholders.items || [], placeholders.total);
     renderActivity(activity.items || activity || []);
     renderSettings(settings);
   }
 
-  refresh();
-  setInterval(refresh, 5000);
+  // Polling a hidden tab is pure waste — a dashboard left open in a background
+  // window would otherwise keep fetching all night.
+  let timers = [];
+  function startPolling() {
+    stopPolling();
+    timers = [setInterval(refreshStatus, FAST_MS), setInterval(refreshLists, SLOW_MS)];
+  }
+  function stopPolling() {
+    timers.forEach(clearInterval);
+    timers = [];
+  }
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) {
+      stopPolling();
+    } else {
+      refreshStatus();
+      refreshLists();
+      startPolling();
+    }
+  });
+
+  refreshStatus();
+  refreshLists();
+  startPolling();
 </script>

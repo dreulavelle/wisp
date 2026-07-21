@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -281,5 +282,55 @@ func TestStatusReportsWhetherEpisodesHaveEverBeenChecked(t *testing.T) {
 	}
 	if _, present := m["last_run_at"]; !present {
 		t.Error("no last_run_at after a pass; the dashboard cannot say when it checked")
+	}
+}
+
+// The placeholder list is unbounded in principle and the dashboard polls it.
+// Sending everything meant 143KB per poll at 484 placeholders — megabytes a
+// minute for one open tab, spent on rows nobody scrolled to.
+func TestPlaceholdersArePagedWithATotal(t *testing.T) {
+	lib := NewLibrary()
+	for i := 0; i < defaultPlaceholderPage*3; i++ {
+		lib.Add(Placeholder{
+			Path:      "/library/movies/T" + strconv.Itoa(i) + "/T.strm",
+			MediaType: "movie", ID: MediaID{SourceTMDB, strconv.Itoa(i + 1)},
+		})
+	}
+	rt := NewRouterWith(RouterOptions{Library: lib, Recorder: NewRecorder()})
+
+	get := func(query string) map[string]any {
+		rec := httptest.NewRecorder()
+		rt.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/admin/api/placeholders"+query, nil))
+		var body map[string]any
+		if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		return body
+	}
+
+	body := get("")
+	items, _ := body["items"].([]any)
+	if len(items) != defaultPlaceholderPage {
+		t.Errorf("returned %d items by default, want %d", len(items), defaultPlaceholderPage)
+	}
+	// The total must still be reported, or the page cannot say what it is showing.
+	if total, _ := body["total"].(float64); int(total) != defaultPlaceholderPage*3 {
+		t.Errorf("total = %v, want %d", body["total"], defaultPlaceholderPage*3)
+	}
+
+	// A caller may ask for fewer.
+	if items, _ := get("?limit=5")["items"].([]any); len(items) != 5 {
+		t.Errorf("limit=5 returned %d items", len(items))
+	}
+
+	// But not for an unbounded amount: a hand-written limit must not turn the
+	// dashboard into a memory spike.
+	if items, _ := get("?limit=100000")["items"].([]any); len(items) > maxPlaceholderPage {
+		t.Errorf("limit=100000 returned %d items, want at most %d", len(items), maxPlaceholderPage)
+	}
+
+	// Nonsense falls back to the default rather than erroring or returning zero.
+	if items, _ := get("?limit=abc")["items"].([]any); len(items) != defaultPlaceholderPage {
+		t.Errorf("limit=abc returned %d items, want the default", len(items))
 	}
 }

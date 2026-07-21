@@ -4,6 +4,8 @@ import (
 	"embed"
 	"net/http"
 	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -159,8 +161,36 @@ func (rt *Router) adminStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, status)
 }
 
+// defaultPlaceholderPage bounds how many rows the dashboard is sent.
+//
+// The list is unbounded in principle — a library is as large as somebody's
+// appetite — and the dashboard polls. Sending everything meant 143KB per poll
+// at 484 placeholders, which on a real library becomes megabytes a minute for
+// one open tab, spent on rows nobody scrolled to. Fifty is more than fits on a
+// screen; the total still comes back so the page can say what it is showing.
+const defaultPlaceholderPage = 50
+
+// maxPlaceholderPage caps what a caller may ask for, so a hand-written
+// ?limit=100000 cannot turn the dashboard into a memory spike.
+const maxPlaceholderPage = 500
+
 func (rt *Router) adminPlaceholders(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"items": rt.library.List()})
+	all := rt.library.List()
+	limit := defaultPlaceholderPage
+	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n > 0 {
+			limit = min(n, maxPlaceholderPage)
+		}
+	}
+
+	items := all
+	if len(items) > limit {
+		items = items[:limit]
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"items": items,
+		"total": len(all),
+	})
 }
 
 func (rt *Router) adminActivity(w http.ResponseWriter, r *http.Request) {

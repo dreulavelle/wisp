@@ -22,6 +22,19 @@ jobs:
       - name: build
         run: CGO_ENABLED=0 go build ./...
 
+      # The dashboard is embedded in the binary as an opaque string, so the Go
+      # compiler never looks at it. A syntax error there builds, ships, installs,
+      # and only shows up as a blank page in front of an operator.
+      - name: dashboard syntax
+        run: |
+          python3 -c "
+          import re, sys
+          s = open('internal/plugin/web/index.html').read()
+          m = re.search(r'<script>(.*?)</script>', s, re.S)
+          sys.exit('no script block found') if not m else open('/tmp/dash.js', 'w').write(m.group(1))
+          "
+          node --check /tmp/dash.js
+
       # Cheap, and it catches the one failure class that otherwise only appears
       # at install time: Silo rejects an archive whose manifest checksum does not
       # match its binary, or whose version disagrees with the binary's embedded
