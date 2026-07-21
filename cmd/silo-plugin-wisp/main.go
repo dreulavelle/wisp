@@ -121,9 +121,18 @@ func (s *runtimeServer) Configure(ctx context.Context, req *pluginv1.ConfigureRe
 			"https://<host>/stremio/<id>/<config>/manifest.json")
 	}
 
+	// Auto-detect URL type. AIOStreams manifests carry a {uuid}/{config} pair
+	// before /manifest.json; if credentials cannot be derived the URL is a
+	// plain Stremio addon (Altmount, NzbDav, …) and we use StremioClient which
+	// calls the standard /stream/{type}/{id}.json endpoint instead.
 	signer := s.signerFor(ctx, next)
-
-	resolver := plugin.NewResolverWith(client, s.log)
+	var resolver *plugin.Resolver
+	if aiostreams.IsStremioURL(next.aioURL) {
+		s.log.Info("configure: detected plain Stremio addon URL; using Stremio stream client", "host", host)
+		resolver = plugin.NewResolverWith(aiostreams.NewStremio(next.aioURL), s.log)
+	} else {
+		resolver = plugin.NewResolverWith(client, s.log)
+	}
 	s.routes.SetHandler(plugin.NewRouterWith(plugin.RouterOptions{
 		Resolver: resolver,
 		Log:      s.log,
