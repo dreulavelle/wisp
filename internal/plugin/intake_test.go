@@ -325,9 +325,9 @@ type stubIdentity struct {
 	calls      int
 }
 
-func (s *stubIdentity) ProviderIDs(context.Context, string, string) (string, string) {
+func (s *stubIdentity) ProviderIDs(context.Context, string, string) (string, string, error) {
 	s.calls++
-	return s.tvdb, s.tmdb
+	return s.tvdb, s.tmdb, nil
 }
 
 // Silo does not always carry a TVDB id. Deriving it from the IMDb id it does

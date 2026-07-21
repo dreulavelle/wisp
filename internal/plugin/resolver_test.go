@@ -258,3 +258,45 @@ func TestAcceptableTiers(t *testing.T) {
 		}
 	}
 }
+
+// The resolver 302s straight to whatever the upstream returned, on a route that
+// is public. A compromised or misconfigured AIOStreams must not be able to turn
+// that into an open redirect to a local file or an internal address.
+func TestResolveRejectsNonHTTPCandidates(t *testing.T) {
+	for _, bad := range []string{
+		"file:///etc/passwd",
+		"javascript:alert(1)",
+		"data:text/html,<script>alert(1)</script>",
+		"ftp://example.invalid/x.mkv",
+		"://nonsense",
+		"https://", // no host
+		"   ",
+	} {
+		r := NewResolver(&stubSearcher{streams: []aiostreams.Stream{
+			{URL: bad, Resolution: "1080p"},
+		}})
+		_, err := r.Resolve(context.Background(), ResolveRequest{
+			MediaType: "movie", IMDbID: "tt1", Quality: "1080p",
+		})
+		if !errors.Is(err, ErrNoMatch) {
+			t.Errorf("candidate %q was accepted (err = %v); want it skipped", bad, err)
+		}
+	}
+}
+
+// Skipping an unusable candidate must not skip the rest of the list.
+func TestResolveSkipsBadCandidateAndTakesTheNext(t *testing.T) {
+	r := NewResolver(&stubSearcher{streams: []aiostreams.Stream{
+		{URL: "file:///etc/passwd", Resolution: "1080p"},
+		{URL: "https://cdn.example.invalid/real.mkv", Resolution: "1080p"},
+	}})
+	got, err := r.Resolve(context.Background(), ResolveRequest{
+		MediaType: "movie", IMDbID: "tt1", Quality: "1080p",
+	})
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	if got.URL != "https://cdn.example.invalid/real.mkv" {
+		t.Errorf("URL = %q, want the second candidate", got.URL)
+	}
+}

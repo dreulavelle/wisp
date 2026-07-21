@@ -49,6 +49,14 @@ type Recorder struct {
 // NewRecorder returns an empty recorder.
 func NewRecorder() *Recorder { return &Recorder{since: time.Now()} }
 
+// Since reports when this recorder started counting, which is what makes its
+// monotonic totals interpretable.
+func (r *Recorder) Since() time.Time {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.since
+}
+
 // Record appends an attempt, evicting the oldest beyond maxActivity.
 func (r *Recorder) Record(a Activity) {
 	r.mu.Lock()
@@ -114,13 +122,19 @@ func (rt *Router) adminIndex(w http.ResponseWriter, r *http.Request) {
 
 func (rt *Router) adminStatus(w http.ResponseWriter, r *http.Request) {
 	resolved, failures, median := rt.recorder.Stats()
+	// These counters are monotonic for the life of the process, not windowed.
+	// Naming them "today" or "24h" would state something false: on a plugin
+	// that has been up for weeks, a failure count from a fortnight ago would
+	// read as a live problem — the one question this panel exists to answer.
+	// counting_since gives the operator the denominator instead.
 	writeJSON(w, http.StatusOK, map[string]any{
 		"version":           rt.version,
 		"resolver_ready":    rt.resolver != nil,
 		"uptime_seconds":    int(time.Since(rt.started).Seconds()),
 		"placeholders":      rt.library.Count(),
-		"resolved_today":    resolved,
-		"failures_24h":      failures,
+		"resolved_total":    resolved,
+		"failures_total":    failures,
+		"counting_since":    rt.recorder.Since(),
 		"median_resolve_ms": median,
 	})
 }

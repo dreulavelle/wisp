@@ -15,7 +15,7 @@ import (
 // in particular is optional on its side. Rather than failing those requests,
 // Wisp derives the missing authority from the IMDb id it does have.
 type IdentityResolver interface {
-	ProviderIDs(ctx context.Context, mediaType, imdbID string) (tvdb, tmdb string)
+	ProviderIDs(ctx context.Context, mediaType, imdbID string) (tvdb, tmdb string, err error)
 }
 
 // MetadataAdapter bridges Wisp's metadata service to the interfaces intake
@@ -64,7 +64,7 @@ func (m *MetadataAdapter) ReleasedEpisodes(ctx context.Context, imdbID string) (
 }
 
 // ProviderIDs returns the TVDB and TMDB ids for an IMDb id.
-func (m *MetadataAdapter) ProviderIDs(ctx context.Context, mediaType, imdbID string) (tvdb, tmdb string) {
+func (m *MetadataAdapter) ProviderIDs(ctx context.Context, mediaType, imdbID string) (tvdb, tmdb string, err error) {
 	return metadata.ProviderIDs(ctx, mediaType, imdbID)
 }
 
@@ -92,7 +92,13 @@ func resolveIdentity(ctx context.Context, mediaType string, ids map[string]strin
 		return MediaID{}, "", wantErr
 	}
 
-	tvdb, tmdb := resolver.ProviderIDs(ctx, mediaType, imdb)
+	tvdb, tmdb, lookupErr := resolver.ProviderIDs(ctx, mediaType, imdb)
+	if lookupErr != nil {
+		// Say the lookup failed rather than reporting "no id exists". They call
+		// for different fixes, and conflating them points the operator at the
+		// wrong one.
+		return MediaID{}, "", fmt.Errorf("%w (lookup for %s failed: %v)", err, imdb, lookupErr)
+	}
 	derived := tmdb
 	if want == SourceTVDB {
 		derived = tvdb

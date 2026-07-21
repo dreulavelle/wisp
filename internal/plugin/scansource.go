@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"strconv"
+	"strings"
 
 	pluginv1 "github.com/Silo-Server/silo-plugin-sdk/pkg/pluginproto/silo/plugin/v1"
 )
@@ -30,6 +31,28 @@ func NewScanSource(library *Library, log *slog.Logger) *ScanSource {
 	return &ScanSource{library: library, log: log}
 }
 
+// marker encodes a position as "<epoch>:<seq>".
+//
+// The epoch is what makes a reset detectable. Sequence numbers restart at zero
+// with the process and Rebuild re-derives them from the files still on disk, so
+// a bare number is ambiguous: the host cannot tell "position 40 of the run that
+// issued it" from "position 40 of a later, shorter run". Getting that wrong is
+// silent — the stored marker outruns the cursor and autoscan simply stops
+// hearing about new placeholders.
+func (s *ScanSource) marker(seq uint64) string {
+	return strconv.FormatUint(s.library.Epoch(), 10) + ":" + strconv.FormatUint(seq, 10)
+}
+
+// resync returns a response that abandons the host's position for our current
+// one. Losing the placeholders written during the confusion beats either
+// replaying the whole library or going permanently deaf.
+func (s *ScanSource) resync(reason, given string) *pluginv1.PollChangesResponse {
+	cursor := s.library.Cursor()
+	s.log.Warn("scansource: resyncing to current position",
+		"reason", reason, "marker", given, "cursor", cursor)
+	return &pluginv1.PollChangesResponse{NextMarker: s.marker(cursor)}
+}
+
 // PollChanges returns placeholders written since the host's last marker.
 func (s *ScanSource) PollChanges(_ context.Context, req *pluginv1.PollChangesRequest) (*pluginv1.PollChangesResponse, error) {
 	raw := req.GetMarker()
@@ -41,24 +64,35 @@ func (s *ScanSource) PollChanges(_ context.Context, req *pluginv1.PollChangesReq
 	if raw == "" {
 		cursor := s.library.Cursor()
 		s.log.Info("scansource: first poll, starting from current position", "cursor", cursor)
-		return &pluginv1.PollChangesResponse{NextMarker: strconv.FormatUint(cursor, 10)}, nil
+		return &pluginv1.PollChangesResponse{NextMarker: s.marker(cursor)}, nil
 	}
 
-	marker, err := strconv.ParseUint(raw, 10, 64)
-	if err != nil {
+	epochPart, seqPart, ok := strings.Cut(raw, ":")
+	if !ok {
+		// A bare number is a marker from before markers carried an epoch. It
+		// cannot be validated against this incarnation, so treat it as foreign.
+		return s.resync("marker predates epoch tagging", raw), nil
+	}
+
+	epoch, epochErr := strconv.ParseUint(epochPart, 10, 64)
+	marker, seqErr := strconv.ParseUint(seqPart, 10, 64)
+	if epochErr != nil || seqErr != nil {
 		// The host stores our marker verbatim and cannot interpret it, so a
-		// corrupt one is ours to recover from. Resyncing to the current
-		// position loses at most the placeholders written during the corruption
-		// — far better than replaying the entire library.
-		cursor := s.library.Cursor()
-		s.log.Warn("scansource: unparseable marker, resyncing to current position",
-			"marker", raw, "cursor", cursor)
-		return &pluginv1.PollChangesResponse{NextMarker: strconv.FormatUint(cursor, 10)}, nil
+		// corrupt one is ours to recover from.
+		return s.resync("unparseable marker", raw), nil
+	}
+	if epoch != s.library.Epoch() {
+		// The index was rebuilt since this marker was issued, so its sequence
+		// numbers mean nothing here. This is the restart case the epoch exists
+		// to catch.
+		return s.resync("index was rebuilt since this marker was issued", raw), nil
 	}
 
 	items, next := s.library.Since(marker)
 	if len(items) == 0 {
-		return &pluginv1.PollChangesResponse{NextMarker: raw}, nil
+		// Since clamps a marker that runs past the cursor; propagate the
+		// clamped value rather than echoing a position we cannot honour.
+		return &pluginv1.PollChangesResponse{NextMarker: s.marker(next)}, nil
 	}
 
 	changes := make([]*pluginv1.ScanSourceChange, 0, len(items))
@@ -83,6 +117,6 @@ func (s *ScanSource) PollChanges(_ context.Context, req *pluginv1.PollChangesReq
 		// host, and source_paths keeps older hosts working.
 		SourcePaths: paths,
 		Changes:     changes,
-		NextMarker:  strconv.FormatUint(next, 10),
+		NextMarker:  s.marker(next),
 	}, nil
 }

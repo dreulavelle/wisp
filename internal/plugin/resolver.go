@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 
@@ -152,7 +153,7 @@ func (r *Resolver) Resolve(ctx context.Context, req ResolveRequest) (aiostreams.
 
 	for _, tier := range acceptableTiers(req.Quality) {
 		for _, s := range streams {
-			if strings.TrimSpace(s.URL) == "" {
+			if !isPlayableURL(s.URL) {
 				continue
 			}
 			if tier == "" || strings.EqualFold(s.Resolution, tier) {
@@ -161,6 +162,25 @@ func (r *Resolver) Resolve(ctx context.Context, req ResolveRequest) (aiostreams.
 		}
 	}
 	return aiostreams.Stream{}, ErrNoMatch
+}
+
+// isPlayableURL reports whether a candidate is safe to redirect a client to.
+//
+// The resolver route is public and this URL goes straight into a Location
+// header, so a compromised or misconfigured upstream would otherwise turn it
+// into an open redirect to file://, javascript:, or an internal address.
+// Restricting to http/https costs nothing — every real debrid or usenet link
+// is one of the two.
+func isPlayableURL(raw string) bool {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return false
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+	return (u.Scheme == "http" || u.Scheme == "https") && u.Host != ""
 }
 
 // acceptableTiers expands a requested quality into an ordered fallback list.

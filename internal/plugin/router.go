@@ -1,6 +1,7 @@
 package plugin
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -10,6 +11,14 @@ import (
 
 	"github.com/dreulavelle/wisp/internal/aiostreams"
 )
+
+// resolveBudget bounds one playback resolution end to end.
+//
+// Chosen against what the client will tolerate rather than what upstream might
+// eventually manage: a viewer who pressed play has already waited through a
+// scrape, and a clear "try again" beats a spinner that resolves after they have
+// given up.
+const resolveBudget = 15 * time.Second
 
 // Settings is the operator-facing configuration the dashboard displays.
 type Settings struct {
@@ -142,8 +151,15 @@ func (rt *Router) handleResolve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Bound the upstream call explicitly. Nothing else on this path imposes a
+	// deadline, so without one a hung AIOStreams leaves ffmpeg and the viewer
+	// on a spinner for the full client timeout. A fast failure the client can
+	// retry beats a slow success it has already given up waiting for.
+	ctx, cancel := context.WithTimeout(r.Context(), resolveBudget)
+	defer cancel()
+
 	start := time.Now()
-	stream, err := rt.resolver.Resolve(r.Context(), req)
+	stream, err := rt.resolver.Resolve(ctx, req)
 	elapsed := time.Since(start)
 
 	if err != nil {

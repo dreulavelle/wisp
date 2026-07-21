@@ -1,6 +1,7 @@
 package plugin
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"log/slog"
@@ -195,4 +196,61 @@ func mustStruct(m map[string]any) *structpb.Struct {
 		panic(err)
 	}
 	return s
+}
+
+// The host's method and path arrive off the wire, and httptest.NewRequest
+// panics rather than erroring on malformed input. grpc-go does not recover
+// handler panics, so without this guard one bad request would take down the
+// whole plugin — resolver, dashboard, autoscan and scheduled task together.
+func TestHandleSurvivesMalformedHostRequests(t *testing.T) {
+	routes := NewHTTPRoutes()
+	routes.SetHandler(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	for _, tc := range []struct {
+		name         string
+		method, path string
+	}{
+		{"empty path", "GET", ""},
+		{"method with a space", "GET /x", "/healthz"},
+		{"method with a newline", "GET\nX", "/healthz"},
+		{"garbage method", "\x00\x01", "/healthz"},
+		{"both malformed", "GET /x", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resp, err := routes.Handle(context.Background(), &pluginv1.HandleHTTPRequest{
+				Method: tc.method,
+				Path:   tc.path,
+			})
+			if err != nil {
+				t.Fatalf("Handle() returned an error instead of a response: %v", err)
+			}
+			if resp.GetStatusCode() == 0 {
+				t.Fatal("Handle() returned no status; the process would have died here")
+			}
+		})
+	}
+}
+
+// A panicking handler must become a 500, not unwind into gRPC and kill the
+// process.
+func TestHandleRecoversAPanickingHandler(t *testing.T) {
+	routes := NewHTTPRoutes()
+	routes.SetHandler(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		panic("boom")
+	}))
+
+	resp, err := routes.Handle(context.Background(), &pluginv1.HandleHTTPRequest{
+		Method: "GET", Path: "/healthz",
+	})
+	if err != nil {
+		t.Fatalf("Handle() error = %v", err)
+	}
+	if resp.GetStatusCode() != http.StatusInternalServerError {
+		t.Errorf("status = %d, want 500", resp.GetStatusCode())
+	}
+	if bytes.Contains(resp.GetBody(), []byte("boom")) {
+		t.Error("panic value leaked into the response body")
+	}
 }

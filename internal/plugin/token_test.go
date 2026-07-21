@@ -154,3 +154,49 @@ func TestUnsignedRejectionLooksLikeAnUnknownPath(t *testing.T) {
 			unsigned.Code, unsigned.Body.String(), nonsense.Code, nonsense.Body.String())
 	}
 }
+
+// IMDbID and Quality are read verbatim from query parameters at verify time, so
+// the canonical encoding must stay injective no matter what they contain. With
+// a delimiter-joined encoding, a field carrying the delimiter could be re-split
+// into a different tuple that signs identically.
+func TestCanonicalIsInjectiveAcrossFieldBoundaries(t *testing.T) {
+	seen := map[string]ResolveRequest{}
+	for _, req := range []ResolveRequest{
+		{MediaType: "series", ID: MediaID{SourceTVDB, "1"}, IMDbID: "tt1", Season: 2, Episode: 3, Quality: "1080p"},
+		// Fields stuffed with the old "|" delimiter and with the new "N:" shape.
+		{MediaType: "series", ID: MediaID{SourceTVDB, "1"}, IMDbID: "tt1|2|3", Season: 0, Episode: 0, Quality: "1080p"},
+		{MediaType: "series", ID: MediaID{SourceTVDB, "1"}, IMDbID: "tt1", Season: 2, Episode: 3, Quality: "1080p|x"},
+		{MediaType: "series", ID: MediaID{SourceTVDB, "1"}, IMDbID: "3:tt1", Season: 2, Episode: 3, Quality: "1080p"},
+		{MediaType: "series", ID: MediaID{SourceTVDB, "1"}, IMDbID: "", Season: 2, Episode: 3, Quality: "3:tt1"},
+		{MediaType: "series", ID: MediaID{SourceTVDB, "1"}, IMDbID: "tt", Season: 12, Episode: 3, Quality: "1080p"},
+		{MediaType: "series", ID: MediaID{SourceTVDB, "1"}, IMDbID: "tt1", Season: 23, Episode: 0, Quality: "1080p"},
+	} {
+		c := canonical(req)
+		if prior, clash := seen[c]; clash {
+			t.Errorf("distinct requests share a canonical form %q:\n  %+v\n  %+v", c, prior, req)
+		}
+		seen[c] = req
+	}
+}
+
+// A token minted for one tuple must not verify against a neighbouring one.
+func TestTokenDoesNotTransferBetweenTuples(t *testing.T) {
+	s := NewSigner("https://aio.example.invalid/x/manifest.json", "hunter2")
+	base := ResolveRequest{MediaType: "series", ID: MediaID{SourceTVDB, "121361"}, IMDbID: "tt0944947", Season: 1, Episode: 9, Quality: "1080p"}
+	token := s.Sign(base)
+
+	for name, alt := range map[string]ResolveRequest{
+		"different episode":      {MediaType: "series", ID: base.ID, IMDbID: base.IMDbID, Season: 1, Episode: 10, Quality: "1080p"},
+		"different season":       {MediaType: "series", ID: base.ID, IMDbID: base.IMDbID, Season: 2, Episode: 9, Quality: "1080p"},
+		"swapped imdb key":       {MediaType: "series", ID: base.ID, IMDbID: "tt0133093", Season: 1, Episode: 9, Quality: "1080p"},
+		"swapped identity":       {MediaType: "series", ID: MediaID{SourceTVDB, "999"}, IMDbID: base.IMDbID, Season: 1, Episode: 9, Quality: "1080p"},
+		"season/episode shifted": {MediaType: "series", ID: base.ID, IMDbID: base.IMDbID, Season: 19, Episode: 0, Quality: "1080p"},
+	} {
+		if s.Verify(alt, token) {
+			t.Errorf("%s: token transferred to a different tuple", name)
+		}
+	}
+	if !s.Verify(base, token) {
+		t.Error("token failed to verify against the tuple it was issued for")
+	}
+}

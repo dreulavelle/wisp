@@ -24,6 +24,11 @@ func poll(t *testing.T, s *ScanSource, marker string) *pluginv1.PollChangesRespo
 	return resp
 }
 
+// markerFor builds the marker a library at the given position would emit.
+func markerFor(l *Library, seq uint64) string {
+	return strconv.FormatUint(l.Epoch(), 10) + ":" + strconv.FormatUint(seq, 10)
+}
+
 func addPlaceholder(l *Library, path string) {
 	l.Add(Placeholder{Path: path, MediaType: "movie", ID: MediaID{SourceTMDB, "1"}})
 }
@@ -42,8 +47,8 @@ func TestFirstPollDoesNotReplayHistory(t *testing.T) {
 	if len(resp.GetSourcePaths()) != 0 || len(resp.GetChanges()) != 0 {
 		t.Errorf("first poll replayed %d path(s); it must start from now", len(resp.GetSourcePaths()))
 	}
-	if resp.GetNextMarker() != "3" {
-		t.Errorf("next marker = %q, want the current cursor 3", resp.GetNextMarker())
+	if got, want := resp.GetNextMarker(), markerFor(lib, 3); got != want {
+		t.Errorf("next marker = %q, want the current cursor %q", got, want)
 	}
 }
 
@@ -157,30 +162,77 @@ func TestPollRecoversFromCorruptMarker(t *testing.T) {
 		addPlaceholder(lib, "/library/"+strconv.Itoa(i)+".strm")
 	}
 
-	for _, corrupt := range []string{"not-a-number", "-1", "9e99", "  ", "1.5"} {
+	for _, corrupt := range []string{"x:1", "1:x", "-1:2", "9e99:1", "  :  ", "1:1.5"} {
 		resp := poll(t, s, corrupt)
 		if len(resp.GetSourcePaths()) != 0 {
 			t.Errorf("marker %q: replayed %d path(s) instead of resyncing",
 				corrupt, len(resp.GetSourcePaths()))
 		}
-		if resp.GetNextMarker() != "5" {
-			t.Errorf("marker %q: next = %q, want a resync to 5", corrupt, resp.GetNextMarker())
+		if got, want := resp.GetNextMarker(), markerFor(lib, 5); got != want {
+			t.Errorf("marker %q: next = %q, want a resync to %q", corrupt, got, want)
 		}
 	}
 }
 
-// A marker ahead of our cursor means the plugin restarted and lost its in-memory
-// index while the host kept its marker. Reporting nothing is correct: the
-// placeholders still exist on disk and the host has already scanned them.
-func TestPollWithMarkerAheadOfCursor(t *testing.T) {
+// A marker ahead of our cursor is a position this incarnation never issued.
+// Echoing it back would make every later poll match nothing, so it is clamped
+// to the cursor instead — the placeholders themselves are already on disk.
+func TestPollClampsMarkerAheadOfCursor(t *testing.T) {
 	s, lib := newScanSource(t)
 	addPlaceholder(lib, "/library/a.strm")
 
-	resp := poll(t, s, "999")
+	resp := poll(t, s, markerFor(lib, 999))
 	if len(resp.GetSourcePaths()) != 0 {
 		t.Errorf("reported %d path(s) for a marker ahead of the cursor", len(resp.GetSourcePaths()))
 	}
-	if resp.GetNextMarker() != "999" {
-		t.Errorf("next marker = %q, want the host's marker preserved", resp.GetNextMarker())
+	if got, want := resp.GetNextMarker(), markerFor(lib, 1); got != want {
+		t.Errorf("next marker = %q, want it clamped to the cursor %q", got, want)
+	}
+}
+
+// The regression this epoch exists to prevent. Sequence numbers restart with
+// the process and Rebuild re-derives them from surviving files, so a library
+// that lost placeholders comes back with a cursor BELOW the marker the host
+// still holds. Before epochs, Since() then matched nothing forever and every
+// new placeholder was silently invisible to autoscan.
+func TestPollRecoversAfterRestartWithAShorterLibrary(t *testing.T) {
+	// A previous incarnation got as far as position 800.
+	before, _ := newScanSource(t)
+	stale := before.marker(800)
+
+	// The plugin restarts; rebuilding finds only three placeholders survived.
+	s, lib := newScanSource(t)
+	for _, p := range []string{"/library/a.strm", "/library/b.strm", "/library/c.strm"} {
+		addPlaceholder(lib, p)
+	}
+
+	// The host still hands back the marker from the old incarnation.
+	resp := poll(t, s, stale)
+	if got, want := resp.GetNextMarker(), markerFor(lib, 3); got != want {
+		t.Fatalf("next marker = %q, want a resync to %q", got, want)
+	}
+
+	// The point of resyncing: a placeholder written now must be reported.
+	addPlaceholder(lib, "/library/new.strm")
+	got := poll(t, s, resp.GetNextMarker()).GetSourcePaths()
+	if len(got) != 1 || got[0] != "/library/new.strm" {
+		t.Fatalf("new placeholder not reported after resync: %v", got)
+	}
+}
+
+// A marker written before markers carried an epoch cannot be validated against
+// this incarnation, so it must be treated as foreign rather than trusted.
+func TestPollResyncsOnPreEpochMarker(t *testing.T) {
+	s, lib := newScanSource(t)
+	for i := 0; i < 4; i++ {
+		addPlaceholder(lib, "/library/"+strconv.Itoa(i)+".strm")
+	}
+
+	resp := poll(t, s, "2")
+	if len(resp.GetSourcePaths()) != 0 {
+		t.Errorf("replayed %d path(s) for a pre-epoch marker", len(resp.GetSourcePaths()))
+	}
+	if got, want := resp.GetNextMarker(), markerFor(lib, 4); got != want {
+		t.Errorf("next marker = %q, want a resync to %q", got, want)
 	}
 }

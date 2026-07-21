@@ -93,7 +93,21 @@ func (s *runtimeServer) Configure(_ context.Context, req *pluginv1.ConfigureRequ
 		host = u.Host
 	}
 
-	resolver := plugin.NewResolver(aiostreams.New(next.aioURL, next.aioPassword))
+	client := aiostreams.New(next.aioURL, next.aioPassword)
+
+	// The resolver route is public, so its tokens are the only thing standing
+	// between the internet and stream links minted against the operator's
+	// debrid quota. Those tokens are signed with a key derived from the
+	// AIOStreams URL and password — which means with no password, the key
+	// derives from the URL alone. For the alias form that URL carries no
+	// encrypted config and is not secret, so anyone who knows it can recompute
+	// the key. Say so plainly; silently running with a guessable key is worse
+	// than refusing to start.
+	if !client.HasCredentials() {
+		s.log.Warn("configure: no AIOStreams password set — resolver tokens are signed with a key derived from the URL alone, which is guessable for alias-form URLs; set a password to make placeholder links unforgeable")
+	}
+
+	resolver := plugin.NewResolver(client)
 	s.routes.SetHandler(plugin.NewRouterWith(plugin.RouterOptions{
 		Resolver: resolver,
 		Log:      s.log,

@@ -266,9 +266,9 @@
     $("tiles").innerHTML = [
       ["Resolver", healthy ? `<span class="ok">ready</span>` : `<span class="bad">not configured</span>`],
       ["Placeholders", `${s.placeholders ?? 0}`],
-      ["Resolved today", `${s.resolved_today ?? 0}`],
+      ["Resolved", `${s.resolved_total ?? 0}`],
       ["Median resolve", ms(s.median_resolve_ms)],
-      ["Failures 24h", `${s.failures_24h ?? 0}`],
+      ["Failures", `${s.failures_total ?? 0}`],
       ["Uptime", `${Math.floor((s.uptime_seconds ?? 0) / 3600)}<small>h</small>`],
     ].map(([k, v]) => `<div class="tile"><dt>${k}</dt><dd>${v}</dd></div>`).join("");
     $("version").textContent = s.version ? `v${s.version}` : "";

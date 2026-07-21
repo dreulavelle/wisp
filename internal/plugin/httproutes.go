@@ -42,7 +42,12 @@ func (s *HTTPRoutes) SetHandler(h http.Handler) {
 }
 
 // Handle replays a host request against the wrapped handler.
-func (s *HTTPRoutes) Handle(ctx context.Context, req *pluginv1.HandleHTTPRequest) (*pluginv1.HandleHTTPResponse, error) {
+//
+// It recovers panics rather than letting them unwind. grpc-go does not recover
+// handler panics, and this is the single entry point for every HTTP route, so
+// one malformed request would otherwise take down the whole plugin process —
+// resolver, dashboard, autoscan and scheduled task together.
+func (s *HTTPRoutes) Handle(ctx context.Context, req *pluginv1.HandleHTTPRequest) (resp *pluginv1.HandleHTTPResponse, err error) {
 	h := s.handler.Load()
 	if h == nil {
 		return &pluginv1.HandleHTTPResponse{
@@ -51,6 +56,16 @@ func (s *HTTPRoutes) Handle(ctx context.Context, req *pluginv1.HandleHTTPRequest
 			Body:       []byte(`{"error":"wisp is not configured yet"}`),
 		}, nil
 	}
+
+	defer func() {
+		if r := recover(); r != nil {
+			resp, err = &pluginv1.HandleHTTPResponse{
+				StatusCode: http.StatusInternalServerError,
+				Headers:    map[string]string{"Content-Type": "application/json"},
+				Body:       []byte(`{"error":"internal error"}`),
+			}, nil
+		}
+	}()
 
 	httpReq := buildRequest(ctx, req)
 	rec := httptest.NewRecorder()
@@ -74,14 +89,34 @@ func (s *HTTPRoutes) Handle(ctx context.Context, req *pluginv1.HandleHTTPRequest
 	}, nil
 }
 
+// knownMethods is the set buildRequest will pass through.
+//
+// httptest.NewRequest panics rather than erroring on a malformed method, and
+// the method arrives off the wire, so anything unrecognised is normalised
+// instead of being handed straight to it.
+var knownMethods = map[string]bool{
+	http.MethodGet: true, http.MethodHead: true, http.MethodPost: true,
+	http.MethodPut: true, http.MethodPatch: true, http.MethodDelete: true,
+	http.MethodConnect: true, http.MethodOptions: true, http.MethodTrace: true,
+}
+
 // buildRequest reconstructs an http.Request from the host's representation.
+//
+// Both inputs it takes from the host are validated first: httptest.NewRequest
+// panics on an empty path or a method containing whitespace, and a panic here
+// would kill the plugin process.
 func buildRequest(ctx context.Context, req *pluginv1.HandleHTTPRequest) *http.Request {
 	method := req.GetMethod()
-	if method == "" {
+	if !knownMethods[method] {
 		method = http.MethodGet
 	}
 
-	target := &url.URL{Path: req.GetPath(), RawQuery: encodeQuery(req.GetQuery())}
+	path := req.GetPath()
+	if path == "" {
+		path = "/"
+	}
+
+	target := &url.URL{Path: path, RawQuery: encodeQuery(req.GetQuery())}
 	httpReq := httptest.NewRequest(method, target.String(), bytes.NewReader(req.GetBody()))
 	for k, v := range req.GetHeaders() {
 		httpReq.Header.Set(k, v)
