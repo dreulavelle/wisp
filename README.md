@@ -1,165 +1,114 @@
-# wisp
+# Wisp
 
-![CI](https://github.com/dreulavelle/wisp/actions/workflows/ci.yml/badge.svg)
+A Silo plugin for on-demand playback. A request becomes a playable library item
+immediately; the actual stream is resolved only when someone presses play.
 
-A standalone request-to-playback engine for [AIOStreams](https://github.com/Viren070/AIOStreams).
+Wisp writes a small `.strm` placeholder into your library, Silo picks it up on
+the next scan, and playback resolves through [AIOStreams](https://github.com/Viren070/AIOStreams)
+at the moment it is needed.
 
-wisp turns the streams AIOStreams selects into ordinary-looking media files. It
-never downloads anything — each virtual file's bytes are range-proxied from the
-resolved stream on demand. Point a media server at the mount and it scans,
-probes, and plays them like local files.
+Because nothing durable ever stores a stream URL, expiring debrid links stop
+being a problem: every play resolves fresh.
 
+## Requirements
+
+- A Silo build with `.strm` support — [dreulavelle/silo](https://github.com/dreulavelle/silo)
+- An AIOStreams instance with a debrid or usenet service configured, so it
+  returns direct links rather than torrent handoffs
+
+There is no container, no mount, and no privileged capability. The plugin runs
+as a subprocess inside Silo, and a placeholder is an ordinary text file.
+
+## Install
+
+```sh
+make zip
 ```
-media server ──scans/reads──▶ wisp ──resolves via──▶ AIOStreams ──▶ debrid / usenet
-   (plays)                (VFS + self-heal)      (finds / ranks / parses)
-```
 
-The stack is just **Silo + wisp + AIOStreams** — no `*arr` apps, no download
-client, no separate request UI. Silo owns requests, approvals, users, and
-availability; wisp owns scheduling, stream resolution, and the virtual library;
-AIOStreams owns stream selection. Silo routes each approved request to wisp
-through the [silo-plugin-wisp](https://github.com/dreulavelle/silo-plugin-wisp)
-`request_router` shim, wisp fulfills it under `/mnt/wisp`, and wisp pings Silo's
-autoscan webhook so the file imports the moment it's pinned.
+Then in Silo: **Administration → Plugins → Manual Install**, upload
+`dist/silo-plugin-wisp.zip`, and fill in:
 
-> **AIOStreams is required.** wisp calls its Search API directly, so whatever you
-> configure *there* — Torrentio, Comet, MediaFusion, Easynews, your debrid — all
-> flows through to wisp. wisp adds no ranking or filtering of its own.
+| Setting | Value |
+|---|---|
+| AIOStreams URL | The full manifest URL from its configure page |
+| AIOStreams Password | Its password, if it has one |
+| Library Path | Where Wisp writes placeholders, e.g. `/library` |
+
+Finally, create a Silo library pointed at that same path.
 
 ## How it works
 
-- **Request** — Silo routes an approved request to wisp's `/api/add`. wisp pins
-  what's available now and **monitors** the rest.
-- **Monitor** — a persistent watchlist pins unreleased movies and newly-aired
-  episodes as they land, waking near the next airstamp rather than polling.
-- **Mount** — wisp self-mounts with embedded rclone; pins appear under four
-  category roots that any media server scans.
-- **Play** — on open, wisp range-proxies the stream's bytes and re-resolves
-  through AIOStreams if a link has died, so playback self-heals.
-
-Because the files carry real bytes, the media server reads real metadata and
-owns playback end to end — direct play, transcode, and seeking all work.
-
-## Library layout
-
-wisp always presents four category roots under the mount, even when empty, so a
-media server can validate every library path from a fresh install:
-
 ```
-/mnt/wisp/
-├── movies/          shows/
-└── anime_movies/    anime_shows/
+request  →  placeholder written  →  autoscan  →  item appears
+play     →  Silo reads the .strm  →  plugin resolves  →  302 to the CDN
 ```
 
-Point Silo at all four, one library per root. A title's category is decided
-**once** and then permanent (the root is part of each file's path). Anime is
-detected from an explicit `is_anime` flag when present, otherwise from a
-conservative Cinemeta heuristic — see [Library layout](docs/Architecture.md#library-layout)
-for the full rules.
+A placeholder addresses the plugin, never a stream:
 
-## Quick start
+```
+http://127.0.0.1:8080/api/v1/plugins/3/resolve/movie/tmdb:603?imdb=tt0133093&quality=1080p&t=<sig>
+```
 
-wisp embeds rclone and self-mounts — one container, no separate rclone process.
+Its contents never change. That is what makes it durable — the file stays
+correct while the stream behind it expires.
+
+### Identity
+
+Movies are identified by TMDB and series by TVDB, in both the resolver path and
+the folder name:
+
+```
+Movies/The Matrix (1999) [tmdb-603]/The Matrix (1999) [2160p].strm
+Shows/Game of Thrones (2011) [tvdb-121361]/Season 01/... S01E09 [1080p].strm
+```
+
+TVDB is the authority media servers agree on for season and episode numbering.
+IMDb's episode ordering diverges from it often enough to file episodes under the
+wrong season, and the "correct" IMDb id does not always map to the "correct"
+TVDB entry.
+
+AIOStreams accepts IMDb ids and nothing else, so the lookup key travels inside
+the signed placeholder URL. Resolving it at play time would put two metadata
+calls in front of every playback.
+
+### Security
+
+The resolver route is public, because the client following a placeholder
+redirect is ffmpeg or a browser and neither carries a Silo session. Every
+placeholder therefore embeds an HMAC over the exact tuple it addresses,
+including quality. Verification happens before any upstream work, and a
+rejection is byte-identical to an unknown path so the endpoint cannot be used to
+enumerate a library.
+
+The signing key derives from configuration, so placeholder URLs survive
+restarts with no secret to persist. Rotating AIOStreams credentials rotates the
+key and invalidates existing placeholders — rare, visible, and it fails closed.
+
+## Capabilities
+
+| Capability | What it does |
+|---|---|
+| `http_routes.v1` | Playback resolver, plus an admin dashboard in Silo's sidebar |
+| `scan_source.v1` | Reports new placeholders to autoscan |
+| `request_router.v1` | Turns Silo requests into placeholders |
+| `scheduled_task.v1` | Writes placeholders for newly aired episodes |
+
+The episode-fill task runs at startup by default. Silo ignores a schedule
+declared in a manifest, so set one under the plugin's task settings if you want
+it to run periodically. It is idempotent and never contacts the stream provider,
+so any cadence is safe.
+
+## Development
 
 ```sh
-cp .env.example .env      # fill in your AIOStreams URL + password
+make test      # unit tests
+make zip       # build the installable archive
+make e2e       # full pipeline against a throwaway Silo (needs Docker)
 ```
 
-```yaml
-services:
-  wisp:
-    image: ghcr.io/dreulavelle/wisp:latest
-    container_name: wisp
-    env_file: .env
-    volumes:
-      - ./data:/data                    # persist the pin + monitor database
-      - /mnt/wisp:/mnt/wisp:rshared     # share the mount out to the host
-    devices: [/dev/fuse]
-    cap_add: [SYS_ADMIN]
-    security_opt: [apparmor:unconfined]
-    ports: ["8080:8080"]
-```
-
-Prepare the host mountpoint once so the FUSE mount propagates to the host (and
-into your media-server container):
-
-```sh
-mkdir -p /mnt/wisp
-mount --bind /mnt/wisp /mnt/wisp && mount --make-rshared /mnt/wisp
-```
-
-Then point your media server at `/mnt/wisp`. If it runs in its own container,
-bind the mount `:ro,rslave` so it re-sees wisp's mount after a restart.
-[Deployment](docs/Deployment.md) covers propagation and surviving reboots; to
-serve over HTTP instead and mount it yourself, leave `WISP_MOUNT_PATH` unset.
-
-## Notifying your media server
-
-On every pin, rename, or delete, wisp tells your media server to rescan the
-affected folder — so new content appears instantly. Delivery is fire-and-forget;
-a slow server never blocks a pin. Configure any combination:
-
-```yaml
-# Silo (recommended) — Autoscan → Sources → generate a webhook URL:
-WISP_NOTIFY_ARR_WEBHOOK_URL: https://silo.example.com/api/v1/autoscan/webhooks/<secret>
-# Jellyfin / Emby — base URL + admin API key:
-WISP_NOTIFY_JELLYFIN_URL: http://jellyfin:8096
-WISP_NOTIFY_JELLYFIN_API_KEY: <api-key>
-# Plex — base URL + token, partial-scans just the changed folder:
-WISP_NOTIFY_PLEX_URL: http://plex:32400
-WISP_NOTIFY_PLEX_TOKEN: <x-plex-token>
-```
-
-> The `ARR` in the Silo variable is the *wire format*, not an integration: wisp
-> emits the JSON a Sonarr/Radarr webhook would send, because that's what
-> media-server autoscan intakes accept natively. No Radarr or Sonarr involved.
-
-## API
-
-```sh
-# Add a movie (pins the best stream now, monitors if unreleased)
-curl -X POST http://localhost:8080/api/add \
-  -d '{"media_type":"movie","imdb_id":"tt1375666","title":"Inception","year":2010}'
-
-# Request-shaped intake (what the Silo shim calls — returns 202, resolves async)
-curl -X POST http://localhost:8080/api/add \
-  -d '{"media_type":"movie","tmdb_id":"27205","qualities":[{"id":"2160p","is4k":true}]}'
-
-# Poll a title's state (for a request router)
-curl "http://localhost:8080/api/requests/status?media_type=movie&tmdb_id=27205"
-```
-
-`/api/add` also drives monitoring directly (`/api/monitors`), lists pins
-(`/api/pins`), and exposes the scheduler (`/api/schedule`). Full endpoints,
-payloads, and status codes are in the [API Reference](docs/API-Reference.md).
-
-### Securing it
-
-**The API is unauthenticated by default** — anyone who can reach port 8080 can
-list or delete every pin and monitor. Set `WISP_API_TOKEN` to require
-`Authorization: Bearer <token>` on the API, and pass it on every call:
-
-```sh
-curl -H "Authorization: Bearer $WISP_API_TOKEN" http://localhost:8080/api/pins
-```
-
-The health endpoints stay open so container healthchecks keep working, and so
-does file serving so FUSE mounts keep working — meaning the token guards the
-API, not access to the media itself. Don't publish the port to an untrusted
-network either way. See
-[API authentication](docs/Configuration.md#api-authentication).
-
-## Configuration
-
-Only `WISP_AIOSTREAMS_URL` and `WISP_AIOSTREAMS_PASSWORD` are required;
-everything else has a sensible default. See [`.env.example`](.env.example) for a
-commented template and [Configuration](docs/Configuration.md) for every variable.
-
-## Documentation
-
-[Architecture](docs/Architecture.md) · [API Reference](docs/API-Reference.md) ·
-[Configuration](docs/Configuration.md) · [Deployment](docs/Deployment.md) ·
-[Feeding wisp](docs/Feeding-wisp.md) · [Troubleshooting](docs/Troubleshooting.md)
+The end-to-end suite installs the real plugin into a real Silo and plays back
+through it. It is the only test covering the seam between plugin and host, and
+it stubs AIOStreams so provider health cannot turn the suite into a coin flip.
 
 ## License
 

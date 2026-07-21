@@ -1,34 +1,36 @@
-# ── Secrets: never commit real env or credential files ──────────────────────
-.env
-.env.*
-!.env.example
-*.pem
-*.key
-*.crt
-*_rsa
-*_ed25519
-secrets.*
-credentials.*
 
-# ── Runtime data (pin + monitor database) ───────────────────────────────────
+*~
+# ── Build artifacts ─────────────────────────────────────────────────────────
+coverage.*
+credentials.*
+*.crt
 /data/
 *.db
 *.db-shm
 *.db-wal
-
-# ── Build artifacts ─────────────────────────────────────────────────────────
-/wisp
 /dist/
-*.exe
-*.test
-*.out
-coverage.*
-
-# ── Editor / OS cruft ───────────────────────────────────────────────────────
+dist/
 .DS_Store
-Thumbs.db
+*_ed25519
+# ── Editor / OS cruft ───────────────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+*.exe
 .idea/
-.vscode/
-*.swp
+*.key
+*.out
+*.pem
+*_rsa
+# ── Runtime data (pin + monitor database) ───────────────────────────────────
+secrets.*
+# ── Secrets: never commit real env or credential files ──────────────────────
+silo-plugin-wisp
 *.swo
-*~
+*.swp
+*.test
+test/e2e/library/
+test/e2e/stub-bin
+Thumbs.db
+.vscode/
+/wisp

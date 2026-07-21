@@ -21,3 +21,19 @@ jobs:
         run: go test -race ./...
       - name: build
         run: CGO_ENABLED=0 go build ./...
+
+      # Cheap, and it catches the one failure class that otherwise only appears
+      # at install time: Silo rejects an archive whose manifest checksum does not
+      # match its binary, or whose version disagrees with the binary's embedded
+      # manifest.
+      - name: package
+        run: |
+          make zip
+          python3 - <<'PY'
+          import hashlib, json, zipfile
+          z = zipfile.ZipFile("dist/silo-plugin-wisp.zip")
+          m = json.loads(z.read("manifest.json"))
+          assert m["checksum"] == hashlib.sha256(z.read("plugin")).hexdigest(), "checksum mismatch"
+          assert m["version"] == json.load(open("cmd/silo-plugin-wisp/manifest.json"))["version"], "version drift"
+          print("archive ok:", m["pluginId"], m["version"])
+          PY

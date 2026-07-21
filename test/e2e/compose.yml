@@ -1,0 +1,52 @@
+# Throwaway stack for the end-to-end test.
+#
+# Deliberately isolated from any real deployment: its own project name, its own
+# ports, and no bind mounts outside this directory. `docker compose down -v`
+# leaves nothing behind.
+#
+# Note what is NOT here: no /dev/fuse, no cap_add, no apparmor override, no
+# mount propagation. Placeholders are ordinary files, so the library is just a
+# shared directory.
+
+services:
+  db:
+    image: pgvector/pgvector:pg18
+    environment:
+      POSTGRES_USER: silo
+      POSTGRES_PASSWORD: silo
+      POSTGRES_DB: silo
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U silo"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  redis:
+    image: redis:alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  silo:
+    image: ${SILO_IMAGE:-ghcr.io/dreulavelle/silo:latest}
+    environment:
+      MODE: integrated
+      SECRET_KEY: e2e0000000000000000000000000000000000000000000000000000000000001
+      DATABASE_URL: postgres://silo:silo@db:5432/silo?sslmode=disable
+      REDIS_URL: redis://redis:6379
+      LOG_LEVEL: info
+    ports:
+      - "${SILO_PORT:-18110}:8080"
+    volumes:
+      - ./library:/library
+    extra_hosts:
+      # Lets Silo reach a resolver stub running on the host, standing in for
+      # the plugin until the plugin itself is installed into the container.
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
