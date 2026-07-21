@@ -107,31 +107,40 @@ func (w *Writer) Write(item Item) (string, error) {
 		return "", fmt.Errorf("placeholder: create directory: %w", err)
 	}
 
-	content := w.target(item) + "\n"
+	if err := writeAtomic(full, w.target(item)+"\n"); err != nil {
+		return "", err
+	}
+	return full, nil
+}
 
-	tmp, err := os.CreateTemp(filepath.Dir(full), ".wisp-*.tmp")
+// writeAtomic writes content to path via a temporary file and a rename. A
+// library scan can run at any moment, and a scanner that reads a half-written
+// .strm would record an item with a truncated URL and no obvious way to
+// notice.
+func writeAtomic(path, content string) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".wisp-*.tmp")
 	if err != nil {
-		return "", fmt.Errorf("placeholder: create temp file: %w", err)
+		return fmt.Errorf("placeholder: create temp file: %w", err)
 	}
 	tmpName := tmp.Name()
 	defer os.Remove(tmpName) // no-op once the rename succeeds
 
 	if _, err := tmp.WriteString(content); err != nil {
 		tmp.Close()
-		return "", fmt.Errorf("placeholder: write: %w", err)
+		return fmt.Errorf("placeholder: write: %w", err)
 	}
 	if err := tmp.Close(); err != nil {
-		return "", fmt.Errorf("placeholder: close: %w", err)
+		return fmt.Errorf("placeholder: close: %w", err)
 	}
 	// Media servers read these as any other user; 0644 matches what a scanner
 	// running under a different uid expects to find.
 	if err := os.Chmod(tmpName, 0o644); err != nil {
-		return "", fmt.Errorf("placeholder: chmod: %w", err)
+		return fmt.Errorf("placeholder: chmod: %w", err)
 	}
-	if err := os.Rename(tmpName, full); err != nil {
-		return "", fmt.Errorf("placeholder: rename into place: %w", err)
+	if err := os.Rename(tmpName, path); err != nil {
+		return fmt.Errorf("placeholder: rename into place: %w", err)
 	}
-	return full, nil
+	return nil
 }
 
 // target builds the URL the placeholder points at.

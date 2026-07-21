@@ -154,6 +154,17 @@ func (s *runtimeServer) Configure(ctx context.Context, req *pluginv1.ConfigureRe
 			s.log.Info("configure: library index rebuilt", "adopted", adopted, "skipped", skipped)
 		}
 
+		// Placeholders written before this configure may address a resolver
+		// base that no longer routes: Silo mints a new installation id on
+		// every plugin upgrade, and the id is baked into every file. Bring
+		// them current now, before anyone presses play against a 404.
+		if rewritten, failed, err := plugin.RetargetPlaceholders(next.libraryPath, writer, s.log); err != nil {
+			s.log.Warn("configure: could not retarget placeholders", "error", err)
+		} else if rewritten > 0 || failed > 0 {
+			s.log.Info("configure: placeholders retargeted",
+				"rewritten", rewritten, "failed", failed, "resolver_base", base)
+		}
+
 		// Create the library roots up front. An operator has to point a Silo
 		// library at each of these before requesting anything, and Silo cannot
 		// be pointed at a directory that does not exist yet.
