@@ -1,6 +1,6 @@
 {
   "pluginId": "wisp",
-  "version": "2.0.1",
+  "version": "2.0.2",
   "siloApiVersion": "v1",
   "category": "Video/Wisp",
   "supportedPlatforms": [
