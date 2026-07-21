@@ -1,5 +1,17 @@
 # Changelog
 
+## [2.0.0](https://github.com/dreulavelle/wisp/compare/v1.6.0...v2.0.0) (2026-07-21)
+
+
+### ⚠ BREAKING CHANGES
+
+* rewrite Wisp as a Silo plugin with on-demand .strm playback ([#44](https://github.com/dreulavelle/wisp/issues/44))
+
+### Features
+
+* publish a catalog feed so Silo can install and update Wisp itself ([5341537](https://github.com/dreulavelle/wisp/commit/5341537df8a3676cdc2c4bb372716fc204af6a2f))
+* rewrite Wisp as a Silo plugin with on-demand .strm playback ([#44](https://github.com/dreulavelle/wisp/issues/44)) ([0e9655b](https://github.com/dreulavelle/wisp/commit/0e9655b60cb4241d15ae9ec5c4759177f1b80cd6))
+
 ## [1.6.0](https://github.com/dreulavelle/wisp/compare/v1.5.0...v1.6.0) (2026-07-19)
 
 
