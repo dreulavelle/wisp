@@ -7,7 +7,9 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	_ "embed"
+	"encoding/base64"
 	"fmt"
 	"log/slog"
 	"net/url"
@@ -54,10 +56,16 @@ type runtimeServer struct {
 }
 
 type settings struct {
-	aioURL      string
-	aioPassword string
-	libraryPath string
+	aioURL        string
+	aioPassword   string
+	libraryPath   string
+	signingSecret string
 }
+
+// signingConfigKey is the plugin-owned config entry holding the resolver
+// signing secret. It is written by Wisp, never by an operator, and is separate
+// from the "global" entry so an admin editing settings cannot disturb it.
+const signingConfigKey = "signing"
 
 func (s *runtimeServer) GetManifest(context.Context, *pluginv1.GetManifestRequest) (*pluginv1.GetManifestResponse, error) {
 	return &pluginv1.GetManifestResponse{Manifest: s.manifest}, nil
@@ -67,6 +75,12 @@ func (s *runtimeServer) Configure(ctx context.Context, req *pluginv1.ConfigureRe
 	next := settings{}
 	for _, entry := range req.GetConfig() {
 		fields := entry.GetValue().GetFields()
+		if entry.GetKey() == signingConfigKey {
+			if v, ok := fields["secret"]; ok {
+				next.signingSecret = strings.TrimSpace(v.GetStringValue())
+			}
+			continue
+		}
 		if v, ok := fields["aiostreams_url"]; ok {
 			next.aioURL = strings.TrimSpace(v.GetStringValue())
 		}
@@ -96,17 +110,17 @@ func (s *runtimeServer) Configure(ctx context.Context, req *pluginv1.ConfigureRe
 
 	client := aiostreams.New(next.aioURL, next.aioPassword)
 
-	// The resolver route is public, so its tokens are the only thing standing
-	// between the internet and stream links minted against the operator's
-	// debrid quota. Those tokens are signed with a key derived from the
-	// AIOStreams URL and password — which means with no password, the key
-	// derives from the URL alone. For the alias form that URL carries no
-	// encrypted config and is not secret, so anyone who knows it can recompute
-	// the key. Say so plainly; silently running with a guessable key is worse
-	// than refusing to start.
+	// AIOStreams' Search API needs credentials even though its Stremio routes
+	// do not, and without them every resolution fails with a 401 at the worst
+	// possible moment — when somebody presses play. For the full URL form the
+	// secret is the config blob already in the URL, so no password is needed;
+	// the alias form carries no blob and genuinely requires one.
 	if !client.HasCredentials() {
-		s.log.Warn("configure: no AIOStreams password set — resolver tokens are signed with a key derived from the URL alone, which is guessable for alias-form URLs; set a password to make placeholder links unforgeable")
+		s.log.Warn("configure: AIOStreams has no usable credentials — the Search API will reject every lookup with a 401. " +
+			"Set an AIOStreams password, or use the full manifest URL form (/stremio/<id>/<config>/manifest.json), which carries its own secret")
 	}
+
+	signer := s.signerFor(ctx, next)
 
 	resolver := plugin.NewResolver(client)
 	s.routes.SetHandler(plugin.NewRouterWith(plugin.RouterOptions{
@@ -116,9 +130,7 @@ func (s *runtimeServer) Configure(ctx context.Context, req *pluginv1.ConfigureRe
 		Settings: plugin.Settings{AIOStreamsHost: host, LibraryPath: next.libraryPath},
 		Library:  s.library,
 		Recorder: s.recorder,
-		// Derived from configuration so placeholder URLs stay valid across
-		// restarts without persisting a secret anywhere.
-		Signer: plugin.NewSigner(next.aioURL, next.aioPassword),
+		Signer:   signer,
 	}).Handler())
 	// Requests can only produce placeholders once a library path is known, so
 	// intake is wired here rather than at startup.
@@ -129,7 +141,7 @@ func (s *runtimeServer) Configure(ctx context.Context, req *pluginv1.ConfigureRe
 		// 404 at playback — so the value belongs in the log at the moment it is
 		// chosen.
 		s.log.Info("configure: placeholders will address this plugin at", "resolver_base", base)
-		writer := plugin.NewWriter(next.libraryPath, base, plugin.NewSigner(next.aioURL, next.aioPassword))
+		writer := plugin.NewWriter(next.libraryPath, base, signer)
 
 		// The index lives in memory; the placeholders on disk are the durable
 		// record. Rebuilding here means a restarted plugin knows what it has
@@ -165,6 +177,64 @@ func (s *runtimeServer) Configure(ctx context.Context, req *pluginv1.ConfigureRe
 	s.log.Info("configure: resolver ready", "aiostreams_host", host, "library_path", next.libraryPath)
 
 	return &pluginv1.ConfigureResponse{}, nil
+}
+
+// signerFor builds the signer that authenticates resolver URLs.
+//
+// The secret is generated once and persisted through the host, so it survives
+// restarts and — critically — does not move when AIOStreams credentials do.
+// Wisp used to derive this key from the AIOStreams URL and password, which
+// meant editing either one silently invalidated every placeholder already
+// written: the files stayed on disk, scanned fine, and 404'd the moment
+// somebody pressed play. Recovering needed every .strm rewritten.
+//
+// Placeholders written under the old derived key keep working: that key is
+// still accepted for verification, it is just no longer used for signing.
+func (s *runtimeServer) signerFor(ctx context.Context, cfg settings) *plugin.Signer {
+	legacy := plugin.NewSigner(cfg.aioURL, cfg.aioPassword)
+
+	secret := cfg.signingSecret
+	if secret == "" {
+		generated, err := newSigningSecret()
+		if err != nil {
+			// Falling back to the derived key keeps playback working rather
+			// than failing closed on a randomness error, at the cost of the
+			// durability this function exists to provide.
+			s.log.Error("configure: could not generate a signing secret; falling back to the credential-derived key", "error", err)
+			return legacy
+		}
+		secret = generated
+		if err := s.persistSigningSecret(ctx, secret); err != nil {
+			// Not persisted means a different secret next restart, which would
+			// invalidate everything written under this one. Use the derived key
+			// instead: it is reproducible, which is the property that matters
+			// more than durability here.
+			s.log.Error("configure: could not persist the signing secret; falling back to the credential-derived key", "error", err)
+			return legacy
+		}
+		s.log.Info("configure: generated a durable resolver signing secret")
+	}
+
+	return plugin.NewSignerFromSecret(secret).AcceptAlso(legacy)
+}
+
+// newSigningSecret returns a fresh random secret.
+func newSigningSecret() (string, error) {
+	raw := make([]byte, 32)
+	if _, err := rand.Read(raw); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(raw), nil
+}
+
+// persistSigningSecret stores the secret as a plugin-owned config entry, which
+// the host hands back on the next Configure.
+func (s *runtimeServer) persistSigningSecret(ctx context.Context, secret string) error {
+	host := sdkruntime.Host()
+	if host == nil {
+		return fmt.Errorf("no host connection")
+	}
+	return host.SetGlobalConfigEntry(ctx, signingConfigKey, map[string]any{"secret": secret})
 }
 
 // resolverBase is the URL placeholders point at.

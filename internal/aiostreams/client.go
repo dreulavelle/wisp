@@ -126,9 +126,28 @@ func New(addonURL, password string) *Client {
 	}
 }
 
-// deriveCredentials mirrors the plugin: a "uuid:password" secret is used
-// verbatim; otherwise the UUID/alias is recovered from the /stremio/{id}/...
-// path and paired with the password.
+// deriveCredentials works out the basic-auth pair for the Search API.
+//
+// The Search API — unlike the public Stremio /stream/ routes — requires
+// authentication. The pair is the instance id and the encrypted configuration
+// blob, and for the full URL form BOTH of those are already in the URL:
+//
+//	/stremio/{uuid}/{config}/manifest.json
+//
+// So no password needs configuring at all. Reading the config segment out of
+// the URL is what makes an install with an empty password work instead of
+// failing every search with a 401 — the operator has already supplied the
+// secret, just as part of the URL they pasted.
+//
+// Precedence, most explicit first:
+//
+//  1. A password already shaped "id:secret" is used verbatim.
+//  2. An explicit password is paired with the id from the URL.
+//  3. The config segment from the URL is paired with the id from the URL.
+//
+// The alias form (/stremio/u/{alias}/manifest.json) carries no config segment,
+// so it genuinely needs a password; that case falls through to an id with no
+// secret, which HasCredentials reports as unusable.
 func deriveCredentials(addonURL, password string) string {
 	password = strings.TrimSpace(password)
 	if strings.Contains(password, ":") {
@@ -140,18 +159,44 @@ func deriveCredentials(addonURL, password string) string {
 	}
 	segments := strings.Split(strings.Trim(parsed.Path, "/"), "/")
 	for i, segment := range segments {
-		if segment == "stremio" && i+1 < len(segments) {
-			id := segments[i+1]
-			if id == "u" && i+2 < len(segments) { // alias form: /stremio/u/{alias}
-				id = segments[i+2]
-			}
-			if password == "" {
-				return id
-			}
+		if segment != "stremio" || i+1 >= len(segments) {
+			continue
+		}
+
+		id := segments[i+1]
+		next := i + 2
+		if id == "u" && i+2 < len(segments) { // alias form: /stremio/u/{alias}
+			id = segments[i+2]
+			next = i + 3
+		}
+
+		if password != "" {
 			return id + ":" + password
 		}
+		// Fall back to the configuration blob carried in the URL. Anything
+		// that is not a trailing resource name is the config segment.
+		if next < len(segments) {
+			if cfg := strings.TrimSpace(segments[next]); cfg != "" && !isResourceSegment(cfg) {
+				return id + ":" + cfg
+			}
+		}
+		return id
 	}
 	return ""
+}
+
+// isResourceSegment reports whether a path segment is an addon resource rather
+// than a configuration blob, so a URL with no config is not mistaken for one
+// whose config happens to be "manifest.json".
+func isResourceSegment(segment string) bool {
+	if strings.HasSuffix(strings.ToLower(segment), ".json") {
+		return true
+	}
+	switch strings.ToLower(segment) {
+	case "manifest", "stream", "catalog", "meta", "subtitles", "addon":
+		return true
+	}
+	return false
 }
 
 type searchResult struct {

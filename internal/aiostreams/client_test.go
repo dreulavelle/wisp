@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -17,7 +18,11 @@ func TestDeriveCredentials(t *testing.T) {
 		{"blob url", "https://h/stremio/uuid-1/blob/manifest.json", "pw", "uuid-1:pw"},
 		{"alias url", "https://h/stremio/u/spoked/manifest.json", "pw", "spoked:pw"},
 		{"verbatim creds", "https://h/stremio/uuid-1/blob/manifest.json", "user:secret", "user:secret"},
-		{"no password", "https://h/stremio/uuid-1/blob/manifest.json", "", "uuid-1"},
+		// With no password the config blob in the URL IS the secret; pairing it
+		// is what lets an install with an empty password authenticate.
+		{"no password, blob in url", "https://h/stremio/uuid-1/blob/manifest.json", "", "uuid-1:blob"},
+		// The alias form carries no blob, so there is genuinely no secret.
+		{"no password, alias has no blob", "https://h/stremio/u/spoked/manifest.json", "", "spoked"},
 		{"no stremio segment", "https://h/manifest.json", "pw", ""},
 	}
 	for _, c := range cases {
@@ -143,8 +148,14 @@ func TestHasCredentials(t *testing.T) {
 	if !New("https://h/stremio/uuid-1/blob/manifest.json", "pw").HasCredentials() {
 		t.Fatal("uuid + password should have credentials")
 	}
-	if New("https://h/stremio/uuid-1/blob/manifest.json", "").HasCredentials() {
-		t.Fatal("uuid without password cannot authenticate")
+	// The full URL form needs no password: the config blob beside the uuid is
+	// the secret the Search API wants.
+	if !New("https://h/stremio/uuid-1/blob/manifest.json", "").HasCredentials() {
+		t.Fatal("uuid + config blob from the URL should have credentials")
+	}
+	// The alias form has no blob, so with no password there is nothing to send.
+	if New("https://h/stremio/u/spoked/manifest.json", "").HasCredentials() {
+		t.Fatal("alias with no password cannot authenticate")
 	}
 }
 
@@ -276,5 +287,73 @@ func TestSearchDoesNotCacheFailures(t *testing.T) {
 				t.Fatalf("upstream hits = %d, want 2 (failure not cached)", got)
 			}
 		})
+	}
+}
+
+// The Search API needs auth even though the Stremio /stream/ routes do not, and
+// for the full URL form the secret is already in the URL: /stremio/{id}/{config}.
+// Reading it there is what makes an install with no password configured work
+// instead of failing every search with a 401.
+func TestDeriveCredentialsUsesConfigBlobFromURL(t *testing.T) {
+	const (
+		id  = "013cce47-9a08-43b6-a87b-59839d88d967"
+		cfg = "eyJpIjoiUVkyYUoyRGRiV0RQdzFabklqNmxCUT09In0"
+	)
+	got := deriveCredentials("https://aio.example.invalid/stremio/"+id+"/"+cfg+"/manifest.json", "")
+	if want := id + ":" + cfg; got != want {
+		t.Errorf("deriveCredentials() = %q, want the id paired with the URL's config blob", got)
+	}
+}
+
+// An explicitly configured password wins: an operator who set one has said
+// something more specific than the URL does.
+func TestDeriveCredentialsPrefersExplicitPassword(t *testing.T) {
+	const id = "013cce47-9a08-43b6-a87b-59839d88d967"
+	got := deriveCredentials("https://aio.example.invalid/stremio/"+id+"/somecfg/manifest.json", "hunter2")
+	if want := id + ":hunter2"; got != want {
+		t.Errorf("deriveCredentials() = %q, want %q", got, want)
+	}
+}
+
+// A "id:secret" password is a complete pair already.
+func TestDeriveCredentialsPassesThroughFullPair(t *testing.T) {
+	got := deriveCredentials("https://aio.example.invalid/stremio/abc/cfg/manifest.json", "someid:somesecret")
+	if got != "someid:somesecret" {
+		t.Errorf("deriveCredentials() = %q, want the pair used verbatim", got)
+	}
+}
+
+// A URL with no config segment must not mistake the resource name for one —
+// "manifest.json" is not a secret, and pairing it would send garbage credentials
+// that look valid to HasCredentials.
+func TestDeriveCredentialsIgnoresResourceSegments(t *testing.T) {
+	for _, raw := range []string{
+		"https://aio.example.invalid/stremio/abc/manifest.json",
+		"https://aio.example.invalid/stremio/u/myalias/manifest.json",
+		"https://aio.example.invalid/stremio/abc/",
+		"https://aio.example.invalid/stremio/abc",
+	} {
+		got := deriveCredentials(raw, "")
+		if strings.Contains(got, ":") {
+			t.Errorf("deriveCredentials(%q) = %q, want no secret invented", raw, got)
+		}
+	}
+}
+
+// The alias form carries no config, so with no password it has no usable
+// credentials — and must say so rather than silently sending a bare id.
+func TestHasCredentialsFalseForAliasWithoutPassword(t *testing.T) {
+	c := New("https://aio.example.invalid/stremio/u/myalias/manifest.json", "")
+	if c.HasCredentials() {
+		t.Error("alias form with no password reports usable credentials")
+	}
+}
+
+// The full URL form has everything it needs, so it must report usable
+// credentials even with no password set.
+func TestHasCredentialsTrueForFullURLWithoutPassword(t *testing.T) {
+	c := New("https://aio.example.invalid/stremio/abc-123/eyJpIjoieCJ9/manifest.json", "")
+	if !c.HasCredentials() {
+		t.Error("full URL form with a config blob reports no usable credentials")
 	}
 }

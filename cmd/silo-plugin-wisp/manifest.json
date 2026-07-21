@@ -42,7 +42,7 @@
   "globalConfigSchema": [
     {
       "key": "global",
-      "jsonSchema": "{\"type\":\"object\",\"properties\":{\"aiostreams_url\":{\"type\":\"string\",\"title\":\"AIOStreams URL\"},\"aiostreams_password\":{\"type\":\"string\",\"title\":\"AIOStreams Password\"},\"library_path\":{\"type\":\"string\",\"title\":\"Library Path\"}},\"required\":[\"aiostreams_url\",\"library_path\"]}",
+      "jsonSchema": "{\"type\":\"object\",\"properties\":{\"aiostreams_url\":{\"type\":\"string\",\"title\":\"AIOStreams URL\"},\"aiostreams_password\":{\"type\":\"string\",\"title\":\"AIOStreams Password (usually not needed)\"},\"library_path\":{\"type\":\"string\",\"title\":\"Library Path\"}},\"required\":[\"aiostreams_url\",\"library_path\"]}",
       "adminForm": {
         "submitLabel": "Save Wisp settings",
         "fields": [
@@ -56,10 +56,10 @@
           },
           {
             "key": "aiostreams_password",
-            "label": "AIOStreams Password",
+            "label": "AIOStreams Password (usually not needed)",
             "control": "ADMIN_FORM_CONTROL_PASSWORD",
             "secret": true,
-            "description": "Password for the AIOStreams instance. Leave empty if it needs none."
+            "description": "Leave this empty. The standard manifest URL (/stremio/<id>/<config>/manifest.json) already carries the credentials Wisp needs. Only fill this in for an alias-form URL (/stremio/u/<alias>/manifest.json), which carries no credentials of its own. Do not paste the config blob here \u2014 Wisp reads it from the URL."
           },
           {
             "key": "library_path",

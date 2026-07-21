@@ -200,3 +200,91 @@ func TestTokenDoesNotTransferBetweenTuples(t *testing.T) {
 		t.Error("token failed to verify against the tuple it was issued for")
 	}
 }
+
+// The whole point of a persisted secret: credentials change, tokens survive.
+//
+// Deriving the key from the AIOStreams URL and password meant editing either
+// one silently invalidated every placeholder already on disk. The files stayed,
+// scanned fine, and 404'd the moment anyone pressed play — recoverable only by
+// rewriting every .strm in the library.
+func TestPersistedSecretSurvivesCredentialChanges(t *testing.T) {
+	req := ResolveRequest{
+		MediaType: "movie", ID: MediaID{SourceTMDB, "87421"},
+		IMDbID: "tt1411250", Quality: "1080p",
+	}
+
+	const secret = "a-persisted-random-secret"
+	token := NewSignerFromSecret(secret).Sign(req)
+
+	// Same secret, completely different AIOStreams configuration.
+	if !NewSignerFromSecret(secret).Verify(req, token) {
+		t.Fatal("a token stopped verifying under the same persisted secret")
+	}
+}
+
+// Upgrading to a persisted secret must not orphan placeholders written under
+// the old credential-derived key.
+func TestLegacyDerivedTokensStillVerifyAfterUpgrade(t *testing.T) {
+	req := ResolveRequest{
+		MediaType: "series", ID: MediaID{SourceTVDB, "121361"},
+		IMDbID: "tt0944947", Season: 1, Episode: 9, Quality: "1080p",
+	}
+
+	const (
+		url = "https://aio.example.invalid/stremio/uuid-1/blob/manifest.json"
+		pw  = "hunter2"
+	)
+	legacyToken := NewSigner(url, pw).Sign(req)
+
+	upgraded := NewSignerFromSecret("fresh-random-secret").AcceptAlso(NewSigner(url, pw))
+	if !upgraded.Verify(req, legacyToken) {
+		t.Error("a placeholder written before the upgrade no longer verifies")
+	}
+
+	// New placeholders are signed with the durable secret, not the legacy key.
+	newToken := upgraded.Sign(req)
+	if newToken == legacyToken {
+		t.Error("new tokens are still being signed with the legacy derived key")
+	}
+	if !upgraded.Verify(req, newToken) {
+		t.Error("a freshly signed token does not verify")
+	}
+}
+
+// Accepting a retired key must not weaken anything else: a token from an
+// unrelated key stays rejected, and the signed tuple is still enforced.
+func TestAcceptedKeysDoNotWeakenVerification(t *testing.T) {
+	req := ResolveRequest{
+		MediaType: "movie", ID: MediaID{SourceTMDB, "603"},
+		IMDbID: "tt0133093", Quality: "1080p",
+	}
+
+	s := NewSignerFromSecret("primary").AcceptAlso(NewSigner("url", "pw"))
+
+	if s.Verify(req, NewSignerFromSecret("some-other-secret").Sign(req)) {
+		t.Error("a token from an unrelated key was accepted")
+	}
+
+	other := req
+	other.ID = MediaID{SourceTMDB, "999"}
+	if s.Verify(other, s.Sign(req)) {
+		t.Error("a token transferred to a different title")
+	}
+}
+
+// A nil or empty legacy signer must be ignored rather than admitting a
+// zero-key signer that would verify attacker-computable tokens.
+func TestAcceptAlsoIgnoresEmptySigners(t *testing.T) {
+	s := NewSignerFromSecret("primary")
+	if got := s.AcceptAlso(nil); got != s {
+		t.Error("AcceptAlso(nil) did not return the receiver")
+	}
+	if len(s.accept) != 0 {
+		t.Errorf("AcceptAlso(nil) registered %d key(s)", len(s.accept))
+	}
+
+	s.AcceptAlso(&Signer{})
+	if len(s.accept) != 0 {
+		t.Errorf("AcceptAlso(empty) registered %d key(s)", len(s.accept))
+	}
+}

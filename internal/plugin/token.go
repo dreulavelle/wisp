@@ -23,6 +23,38 @@ import (
 // implies access to the library those placeholders live in.
 type Signer struct {
 	key []byte
+
+	// accept holds keys that verify but never sign. A placeholder is a durable
+	// file: it may have been written months ago under a key this install no
+	// longer uses. Verifying against retired keys lets the signing key change
+	// without silently breaking every library item that predates the change.
+	accept [][]byte
+}
+
+// NewSignerFromSecret builds a signer from a stored secret.
+//
+// This is the durable form and the one Wisp uses. The secret is generated once
+// and persisted, so it does not move when AIOStreams credentials do — which
+// matters because those credentials are exactly the kind of thing an operator
+// edits, and every edit to a derived key invalidates every placeholder already
+// on disk. That failure is silent until someone presses play.
+func NewSignerFromSecret(secret string) *Signer {
+	h := hmac.New(sha256.New, []byte("wisp-resolver-token-v1"))
+	_, _ = h.Write([]byte(secret))
+	return &Signer{key: h.Sum(nil)}
+}
+
+// AcceptAlso makes s verify tokens issued by other, without signing with it.
+//
+// Used to keep placeholders written under the old credential-derived key
+// playable after the switch to a persisted secret, so an upgrade does not
+// require rewriting a library.
+func (s *Signer) AcceptAlso(other *Signer) *Signer {
+	if other == nil || len(other.key) == 0 {
+		return s
+	}
+	s.accept = append(s.accept, other.key)
+	return s
 }
 
 // tokenLength is how many base64 characters of the digest are kept.
@@ -91,7 +123,11 @@ func canonical(req ResolveRequest) string {
 
 // Sign returns the token for a resolver request.
 func (s *Signer) Sign(req ResolveRequest) string {
-	mac := hmac.New(sha256.New, s.key)
+	return signWith(s.key, req)
+}
+
+func signWith(key []byte, req ResolveRequest) string {
+	mac := hmac.New(sha256.New, key)
 	_, _ = mac.Write([]byte(canonical(req)))
 	sum := base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 	return sum[:tokenLength]
@@ -100,10 +136,17 @@ func (s *Signer) Sign(req ResolveRequest) string {
 // Verify reports whether a token authorizes a request.
 //
 // The comparison is constant time so that a wrong token cannot be refined by
-// timing one character at a time.
+// timing one character at a time. Every accepted key is checked rather than
+// returning early, so verification cost does not reveal which key matched.
 func (s *Signer) Verify(req ResolveRequest, token string) bool {
 	if len(token) != tokenLength {
 		return false
 	}
-	return hmac.Equal([]byte(s.Sign(req)), []byte(token))
+	ok := hmac.Equal([]byte(signWith(s.key, req)), []byte(token))
+	for _, key := range s.accept {
+		if hmac.Equal([]byte(signWith(key, req)), []byte(token)) {
+			ok = true
+		}
+	}
+	return ok
 }
