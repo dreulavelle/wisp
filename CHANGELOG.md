@@ -1,5 +1,21 @@
 # Changelog
 
+## [3.0.0](https://github.com/dreulavelle/wisp/compare/v2.1.0...v3.0.0) (2026-07-21)
+
+
+### ⚠ BREAKING CHANGES
+
+* **plugin:** the aiostreams_password setting is removed. Installs using the alias form of the manifest URL must switch to the full form from the AIOStreams configure page.
+
+### Features
+
+* **plugin:** drop the AIOStreams password field ([48db6e9](https://github.com/dreulavelle/wisp/commit/48db6e9e5e2d1b458d9abf746ebd68aad9f72921))
+
+
+### Bug Fixes
+
+* **plugin:** authenticate from the URL and stop deriving the signing key from credentials ([115a220](https://github.com/dreulavelle/wisp/commit/115a2203325dbd8207f893cd7573803351b055e6))
+
 ## [2.1.0](https://github.com/dreulavelle/wisp/compare/v2.0.3...v2.1.0) (2026-07-21)
 
 
