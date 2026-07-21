@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.0.1](https://github.com/dreulavelle/wisp/compare/v2.0.0...v2.0.1) (2026-07-21)
+
+
+### Bug Fixes
+
+* **release:** publish plugin artifacts and stop shipping test URLs ([89ec108](https://github.com/dreulavelle/wisp/commit/89ec10849771a76f13d117a57c7ed4b411975b68))
+
 ## [2.0.0](https://github.com/dreulavelle/wisp/compare/v1.6.0...v2.0.0) (2026-07-21)
 
 
