@@ -163,27 +163,29 @@ func (rt *Router) handleResolve(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	start := time.Now()
-	stream, err := rt.resolver.Resolve(ctx, req)
+	stream, trace, err := rt.resolver.ResolveTraced(ctx, req)
 	elapsed := time.Since(start)
 
 	if err != nil {
 		rt.recorder.Record(Activity{
 			At: start, MediaID: req.ID.String(), Quality: req.Quality,
-			SearchMS: elapsed.Milliseconds(), TotalMS: elapsed.Milliseconds(),
-			Error: shortReason(err),
+			SearchMS: trace.SearchMS, VerifyMS: trace.VerifyMS,
+			TotalMS: elapsed.Milliseconds(),
+			Error:   shortReason(err),
 		})
 		rt.library.MarkFailed(req.ID, req.Season, req.Episode, shortReason(err))
 		rt.writeResolveError(w, req, err, elapsed)
 		return
 	}
 
-	// Selection is in-process and effectively free; splitting it out anyway
-	// makes it obvious on the dashboard that latency lives upstream, which is
-	// the first question an operator asks when playback feels slow.
+	// Split into the two costs that actually exist: asking the provider, and
+	// discarding candidates that were not serving. Which one dominates is the
+	// first question worth answering when playback feels slow, and they call
+	// for different fixes.
 	rt.recorder.Record(Activity{
 		At: start, Title: stream.Filename, MediaID: req.ID.String(),
 		Quality:  stream.Resolution,
-		SearchMS: elapsed.Milliseconds(), SelectMS: 0, RedirectMS: 0,
+		SearchMS: trace.SearchMS, VerifyMS: trace.VerifyMS,
 		TotalMS: elapsed.Milliseconds(),
 	})
 	rt.library.MarkResolved(req.ID, req.Season, req.Episode)

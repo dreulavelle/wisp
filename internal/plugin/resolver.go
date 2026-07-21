@@ -172,6 +172,19 @@ const liveChecks = 4
 // even when that one is fine.
 const liveCheckTimeout = 3 * time.Second
 
+// Trace breaks down where a resolution spent its time.
+//
+// The dashboard used to show a three-segment bar whose last two segments were
+// hardcoded to zero, so it was a single colour pretending to be a breakdown.
+// The split that actually exists is worth seeing: time in AIOStreams' own
+// search versus time spent discarding candidates that were not serving. If
+// verification dominates, the provider is handing out dead links; if search
+// does, the provider itself is slow. Those call for different fixes.
+type Trace struct {
+	SearchMS int64 `json:"search_ms"`
+	VerifyMS int64 `json:"verify_ms"`
+}
+
 // Resolve returns a directly playable URL for a request.
 //
 // Candidate ordering is AIOStreams' own: it already parses, ranks, and filters
@@ -187,17 +200,30 @@ const liveCheckTimeout = 3 * time.Second
 // "Invalid data found when processing input" and a failed playback that looks
 // like a Wisp bug rather than an unavailable release.
 func (r *Resolver) Resolve(ctx context.Context, req ResolveRequest) (aiostreams.Stream, error) {
+	stream, _, err := r.ResolveTraced(ctx, req)
+	return stream, err
+}
+
+// ResolveTraced is Resolve with a timing breakdown.
+func (r *Resolver) ResolveTraced(ctx context.Context, req ResolveRequest) (aiostreams.Stream, Trace, error) {
+	var trace Trace
+
 	// AIOStreams accepts IMDb ids and nothing else: tmdb: and tvdb: ids return
 	// zero candidates against a live instance. Without a lookup key there is
 	// nothing to search for.
 	if req.IMDbID == "" {
-		return aiostreams.Stream{}, ErrNoLookupKey
+		return aiostreams.Stream{}, trace, ErrNoLookupKey
 	}
 
+	searchStart := time.Now()
 	streams, err := r.streams.Search(ctx, req.MediaType, req.IMDbID, req.Season, req.Episode)
+	trace.SearchMS = time.Since(searchStart).Milliseconds()
 	if err != nil {
-		return aiostreams.Stream{}, err
+		return aiostreams.Stream{}, trace, err
 	}
+
+	verifyStart := time.Now()
+	defer func() { trace.VerifyMS = time.Since(verifyStart).Milliseconds() }()
 
 	for _, tier := range acceptableTiers(req.Quality) {
 		var candidates []aiostreams.Stream
@@ -217,10 +243,11 @@ func (r *Resolver) Resolve(ctx context.Context, req ResolveRequest) (aiostreams.
 			continue
 		}
 		if picked, ok := r.firstLive(ctx, candidates); ok {
-			return picked, nil
+			trace.VerifyMS = time.Since(verifyStart).Milliseconds()
+			return picked, trace, nil
 		}
 	}
-	return aiostreams.Stream{}, ErrNoMatch
+	return aiostreams.Stream{}, trace, ErrNoMatch
 }
 
 // firstLive returns the earliest candidate that is actually serving.

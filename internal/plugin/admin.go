@@ -27,15 +27,14 @@ const maxActivity = 50
 // playback is slow; the split tells them whether to look at their AIOStreams
 // instance or at their own selection rules.
 type Activity struct {
-	At         time.Time `json:"at"`
-	Title      string    `json:"title,omitempty"`
-	MediaID    string    `json:"media_id,omitempty"`
-	Quality    string    `json:"quality,omitempty"`
-	SearchMS   int64     `json:"search_ms"`
-	SelectMS   int64     `json:"select_ms"`
-	RedirectMS int64     `json:"redirect_ms"`
-	TotalMS    int64     `json:"total_ms"`
-	Error      string    `json:"error,omitempty"`
+	At       time.Time `json:"at"`
+	Title    string    `json:"title,omitempty"`
+	MediaID  string    `json:"media_id,omitempty"`
+	Quality  string    `json:"quality,omitempty"`
+	SearchMS int64     `json:"search_ms"`
+	VerifyMS int64     `json:"verify_ms"`
+	TotalMS  int64     `json:"total_ms"`
+	Error    string    `json:"error,omitempty"`
 }
 
 // Recorder keeps a bounded, newest-first log of resolve attempts.

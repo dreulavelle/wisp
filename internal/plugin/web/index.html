@@ -162,9 +162,11 @@
   .hop .total.slow { color: var(--fault); }
   .hop .bar { grid-column: 1 / -1; display: flex; height: 4px; border-radius: 2px; overflow: hidden; background: var(--line); }
   .hop .seg { height: 100%; }
+  /* Two real costs: asking the provider, and discarding candidates that were
+     not serving. Cold for the wait, dim gold for the work discarded — gold
+     stays reserved for resolution itself. */
   .hop .seg.search { background: var(--cold); }
-  .hop .seg.select { background: var(--wisp-dim); }
-  .hop .seg.redirect { background: var(--wisp); }
+  .hop .seg.verify { background: var(--wisp-dim); }
   .hop .legend { grid-column: 1 / -1; font: 400 10px/1 var(--mono); color: var(--faint); letter-spacing: 0.04em; }
 
   .key { display: flex; gap: 14px; flex-wrap: wrap; margin-top: 14px; }
@@ -357,7 +359,7 @@
       return `<div class="hop">
         <span class="title">${esc(r.title || r.imdb_id || "unknown")}</span>
         <span class="total ${total > 10000 ? "slow" : ""}">${ms(total)}</span>
-        <div class="bar">${seg("search", r.search_ms)}${seg("select", r.select_ms)}${seg("redirect", r.redirect_ms)}</div>
+        <div class="bar">${seg("search", r.search_ms)}${seg("verify", r.verify_ms)}</div>
         <span class="legend">${esc(r.quality || "—")} &middot; ${ago(r.at)}${r.error ? ` &middot; ${esc(r.error)}` : ""}</span>
       </div>`;
     }).join("")}</div>`;

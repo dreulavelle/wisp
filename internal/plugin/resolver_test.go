@@ -5,8 +5,10 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/dreulavelle/wisp/internal/aiostreams"
 )
@@ -389,5 +391,54 @@ func TestResolveLivenessDoesNotReorderCandidates(t *testing.T) {
 	})
 	if err != nil || got.URL != "https://cdn.example.invalid/first.mkv" {
 		t.Errorf("got %q (%v), want AIOStreams' own first candidate", got.URL, err)
+	}
+}
+
+// The dashboard showed a three-segment bar whose last two segments were
+// hardcoded to zero — a single colour pretending to be a breakdown. The split
+// that actually exists is worth seeing: time asking the provider, versus time
+// discarding candidates that were not serving.
+func TestResolveTracedSeparatesSearchFromVerification(t *testing.T) {
+	slowSearch := &stubSearcher{streams: []aiostreams.Stream{
+		{URL: "https://cdn.example.invalid/dead.mkv", Resolution: "1080p"},
+		{URL: "https://cdn.example.invalid/live.mkv", Resolution: "1080p"},
+	}}
+	r := NewResolver(slowSearch)
+	r.live = func(_ context.Context, u string) error {
+		time.Sleep(30 * time.Millisecond)
+		if strings.Contains(u, "dead") {
+			return errors.New("not serving")
+		}
+		return nil
+	}
+
+	got, trace, err := r.ResolveTraced(context.Background(), ResolveRequest{
+		MediaType: "movie", IMDbID: "tt1", Quality: "1080p",
+	})
+	if err != nil {
+		t.Fatalf("ResolveTraced() error = %v", err)
+	}
+	if got.URL != "https://cdn.example.invalid/live.mkv" {
+		t.Errorf("picked %q, want the serving candidate", got.URL)
+	}
+	// Verification is where the time went here, and the trace has to say so:
+	// "the provider is handing out dead links" and "the provider is slow" are
+	// different problems with different fixes.
+	if trace.VerifyMS <= 0 {
+		t.Error("verification time was not recorded; the bar would attribute it to search")
+	}
+}
+
+// A failure still reports where the time went — that is when it matters most.
+func TestResolveTracedReportsTimingOnFailure(t *testing.T) {
+	r := NewResolver(&stubSearcher{err: errors.New("upstream down")})
+	_, trace, err := r.ResolveTraced(context.Background(), ResolveRequest{
+		MediaType: "movie", IMDbID: "tt1",
+	})
+	if err == nil {
+		t.Fatal("expected the search failure to surface")
+	}
+	if trace.SearchMS < 0 {
+		t.Errorf("search time = %d", trace.SearchMS)
 	}
 }
