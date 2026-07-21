@@ -1,5 +1,17 @@
 # Changelog
 
+## [2.1.0](https://github.com/dreulavelle/wisp/compare/v2.0.3...v2.1.0) (2026-07-21)
+
+
+### Features
+
+* **plugin:** split anime into its own library roots ([1d3d793](https://github.com/dreulavelle/wisp/commit/1d3d7939d50202c35431b061402e44390b40eedc))
+
+
+### Bug Fixes
+
+* **plugin:** address placeholders at this plugin's real installation id ([66f28ec](https://github.com/dreulavelle/wisp/commit/66f28ec095e37c534ec2d6eb57f59df1766edd00))
+
 ## [2.0.3](https://github.com/dreulavelle/wisp/compare/v2.0.2...v2.0.3) (2026-07-21)
 
 
