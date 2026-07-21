@@ -360,3 +360,75 @@ func TestEnsureRootsIsIdempotentAndPreservesContent(t *testing.T) {
 		t.Errorf("existing content disturbed: %q, %v", body, readErr)
 	}
 }
+
+// A bind mount that has detached looks exactly like a missing directory, and
+// os.MkdirAll would happily recreate the tree inside the container's own
+// filesystem. Wisp would then appear to work — Silo scans the same path from
+// the same container — and lose the entire library on the next restart, having
+// filled the writable layer in the meantime. Refusing turns silent data loss
+// into an obvious error.
+func TestWriteRefusesToCreateAMissingLibraryRoot(t *testing.T) {
+	gone := filepath.Join(t.TempDir(), "detached-mount")
+	w := NewWriter(gone, "http://127.0.0.1:8080/api/v1/plugins/8", nil)
+
+	path, err := w.Write(Item{
+		MediaType: "movie", Title: "T", Year: 2024,
+		ID: MediaID{SourceTMDB, "1"}, IMDbID: "tt1",
+	})
+	if err == nil {
+		t.Fatalf("wrote into a library root that does not exist: %s", path)
+	}
+	if _, statErr := os.Stat(gone); statErr == nil {
+		t.Error("the missing library root was created; a detached mount would be masked")
+	}
+	// The message has to name the path, or an operator cannot tell which mount.
+	if !strings.Contains(err.Error(), gone) {
+		t.Errorf("error does not name the path: %v", err)
+	}
+}
+
+// EnsureRoots runs on every Configure, so it must refuse for the same reason.
+func TestEnsureRootsRefusesAMissingLibraryRoot(t *testing.T) {
+	gone := filepath.Join(t.TempDir(), "detached-mount")
+	if _, err := NewWriter(gone, "http://x", nil).EnsureRoots(); err == nil {
+		t.Fatal("EnsureRoots created a library root that does not exist")
+	}
+	if _, err := os.Stat(gone); err == nil {
+		t.Error("the missing library root was created")
+	}
+}
+
+// A path that exists but is a file is configuration pointed at the wrong thing.
+func TestWriteRefusesALibraryRootThatIsAFile(t *testing.T) {
+	f := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(f, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := NewWriter(f, "http://x", nil).Write(Item{
+		MediaType: "movie", Title: "T", Year: 2024,
+		ID: MediaID{SourceTMDB, "1"}, IMDbID: "tt1",
+	})
+	if err == nil {
+		t.Fatal("accepted a library path that is a file")
+	}
+}
+
+// An unwritable library must fail with something that names the cause.
+func TestWriteReportsAnUnwritableLibrary(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Chmod(root, 0o555); err != nil {
+		t.Skip("cannot make the directory read-only")
+	}
+	t.Cleanup(func() { _ = os.Chmod(root, 0o755) })
+
+	_, err := NewWriter(root, "http://x", nil).Write(Item{
+		MediaType: "movie", Title: "T", Year: 2024,
+		ID: MediaID{SourceTMDB, "1"}, IMDbID: "tt1",
+	})
+	if err == nil {
+		t.Fatal("write into a read-only library reported success")
+	}
+	if !strings.Contains(strings.ToLower(err.Error()), "permission") {
+		t.Errorf("error does not mention permissions: %v", err)
+	}
+}

@@ -85,6 +85,18 @@ func (w *Writer) Write(item Item) (string, error) {
 		return "", fmt.Errorf("placeholder: %s needs an IMDb lookup key", item.ID)
 	}
 
+	// The library root must already exist. os.MkdirAll below would happily
+	// create it, and that is the dangerous case rather than a convenience: a
+	// bind mount that has detached looks exactly like a missing directory. Left
+	// to itself, Wisp would recreate the tree inside the container's own
+	// filesystem, appear to work — Silo scans the same path from the same
+	// container — and lose the entire library on the next restart, filling the
+	// writable layer in the meantime. Failing here turns silent data loss into
+	// an obvious error.
+	if err := w.checkRoot(); err != nil {
+		return "", err
+	}
+
 	rel, err := w.relPath(item)
 	if err != nil {
 		return "", err
@@ -165,6 +177,29 @@ const (
 	rootAnimeShows  = "anime/shows"
 )
 
+// checkRoot verifies the configured library root exists and is a directory.
+//
+// Deliberately not created if missing: see Write. A detached mount and an
+// unconfigured path are indistinguishable from here, and both are worth
+// stopping for.
+func (w *Writer) checkRoot() error {
+	if w.root == "" {
+		return fmt.Errorf("placeholder: library path is not configured")
+	}
+	info, err := os.Stat(w.root)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("placeholder: library path %q does not exist; refusing to create it, "+
+				"because a detached mount looks the same and writing into one loses the library", w.root)
+		}
+		return fmt.Errorf("placeholder: library path %q: %w", w.root, err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("placeholder: library path %q is not a directory", w.root)
+	}
+	return nil
+}
+
 // LibraryRoots lists every root Wisp writes into, in a stable order.
 func LibraryRoots() []string {
 	return []string{rootMovies, rootShows, rootAnimeMovies, rootAnimeShows}
@@ -183,8 +218,10 @@ func LibraryRoots() []string {
 // noteworthy; failing to is, and that error is returned rather than logged and
 // dropped — an unwritable library means every later request fails.
 func (w *Writer) EnsureRoots() (created []string, err error) {
-	if w.root == "" {
-		return nil, fmt.Errorf("placeholder: library path is not configured")
+	// Same reasoning as Write: the roots BELOW the library path are ours to
+	// create, the library path itself is not.
+	if err := w.checkRoot(); err != nil {
+		return nil, err
 	}
 	for _, rel := range LibraryRoots() {
 		full := filepath.Join(w.root, filepath.FromSlash(rel))
