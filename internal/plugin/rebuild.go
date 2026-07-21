@@ -13,6 +13,34 @@ import (
 // A placeholder is one URL; anything larger is not one.
 const maxPlaceholderSize = 64 << 10
 
+// readPlaceholderTarget returns the URL a placeholder points at: the first
+// non-empty, non-comment line of the file.
+func readPlaceholderTarget(path string) (string, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	target, _, err := splitPlaceholder(string(raw), path)
+	return target, err
+}
+
+// splitPlaceholder locates the target line within a placeholder's contents and
+// returns it alongside the index of the line it came from.
+//
+// The index is what lets a rewrite replace the target in place while leaving
+// everything around it — comments, blank lines, whatever a hand-written file
+// carries — exactly as it was. A migration that runs unattended across an
+// entire library must not be the thing that deletes somebody's annotations.
+func splitPlaceholder(contents, path string) (target string, line int, err error) {
+	for i, raw := range strings.Split(contents, "\n") {
+		trimmed := strings.TrimSpace(raw)
+		if trimmed != "" && !strings.HasPrefix(trimmed, "#") {
+			return trimmed, i, nil
+		}
+	}
+	return "", 0, fmt.Errorf("rebuild: %s has no target", path)
+}
+
 // ParsePlaceholder reads a .strm file back into the item it describes.
 //
 // This is what makes the in-memory index disposable: the placeholder files are
@@ -31,21 +59,9 @@ func ParsePlaceholder(path string) (Placeholder, error) {
 		return Placeholder{}, fmt.Errorf("rebuild: %s is too large to be a placeholder", path)
 	}
 
-	raw, err := os.ReadFile(path)
+	target, err := readPlaceholderTarget(path)
 	if err != nil {
 		return Placeholder{}, err
-	}
-
-	target := ""
-	for _, line := range strings.Split(string(raw), "\n") {
-		line = strings.TrimSpace(line)
-		if line != "" && !strings.HasPrefix(line, "#") {
-			target = line
-			break
-		}
-	}
-	if target == "" {
-		return Placeholder{}, fmt.Errorf("rebuild: %s has no target", path)
 	}
 
 	u, err := url.Parse(target)
