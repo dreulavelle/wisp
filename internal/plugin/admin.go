@@ -35,6 +35,12 @@ type Activity struct {
 	VerifyMS int64     `json:"verify_ms"`
 	TotalMS  int64     `json:"total_ms"`
 	Error    string    `json:"error,omitempty"`
+
+	// Reused marks an answer served from the resolver's reuse window. Shown as
+	// such, and excluded from the latency median: a reused answer took no time
+	// because it did no work, and a seek-happy session would otherwise bury a
+	// genuinely slow provider under a pile of zeros.
+	Reused bool `json:"reused,omitempty"`
 }
 
 // Recorder keeps a bounded, newest-first log of resolve attempts.
@@ -42,9 +48,10 @@ type Recorder struct {
 	mu       sync.Mutex
 	entries  []Activity
 	resolved int
+	reused   int // of resolved, how many were answered from the reuse window
 	failures int
 	since    time.Time
-	samples  []int64 // total latencies, for a median
+	samples  []int64 // total latencies of full resolutions, for a median
 }
 
 // NewRecorder returns an empty recorder.
@@ -72,6 +79,10 @@ func (r *Recorder) Record(a Activity) {
 		return
 	}
 	r.resolved++
+	if a.Reused {
+		r.reused++
+		return
+	}
 	r.samples = append(r.samples, a.TotalMS)
 	if len(r.samples) > 200 {
 		r.samples = r.samples[len(r.samples)-200:]
@@ -87,19 +98,20 @@ func (r *Recorder) Snapshot() []Activity {
 	return out
 }
 
-// Stats returns aggregate counters for the dashboard.
-func (r *Recorder) Stats() (resolved, failures int, medianMS int64) {
+// Stats returns aggregate counters for the dashboard. The median covers full
+// resolutions only — reused answers are counted, not timed.
+func (r *Recorder) Stats() (resolved, reused, failures int, medianMS int64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	resolved, failures = r.resolved, r.failures
+	resolved, reused, failures = r.resolved, r.reused, r.failures
 	if len(r.samples) == 0 {
-		return resolved, failures, 0
+		return resolved, reused, failures, 0
 	}
 	sorted := make([]int64, len(r.samples))
 	copy(sorted, r.samples)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
-	return resolved, failures, sorted[len(sorted)/2]
+	return resolved, reused, failures, sorted[len(sorted)/2]
 }
 
 // adminIndex serves the dashboard shell.
@@ -122,7 +134,7 @@ func (rt *Router) adminIndex(w http.ResponseWriter, r *http.Request) {
 }
 
 func (rt *Router) adminStatus(w http.ResponseWriter, r *http.Request) {
-	resolved, failures, median := rt.recorder.Stats()
+	resolved, reused, failures, median := rt.recorder.Stats()
 	// These counters are monotonic for the life of the process, not windowed.
 	// Naming them "today" or "24h" would state something false: on a plugin
 	// that has been up for weeks, a failure count from a fortnight ago would
@@ -134,6 +146,7 @@ func (rt *Router) adminStatus(w http.ResponseWriter, r *http.Request) {
 		"uptime_seconds":    int(time.Since(rt.started).Seconds()),
 		"placeholders":      rt.library.Count(),
 		"resolved_total":    resolved,
+		"reused_total":      reused,
 		"failures_total":    failures,
 		"counting_since":    rt.recorder.Since(),
 		"median_resolve_ms": median,

@@ -17,6 +17,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/dreulavelle/wisp/internal/aiostreams"
@@ -42,6 +43,12 @@ type ResolveRequest struct {
 	Season  int
 	Episode int
 	Quality string // requested tier, e.g. "2160p"; empty means no preference
+
+	// Fresh demands a full resolution, bypassing the short reuse window and any
+	// remembered probe failures. Set by a caller that has just watched the
+	// previously-issued URL fail — reusing the answer that broke would hand the
+	// failure straight back. Not part of a placeholder's signed tuple.
+	Fresh bool
 }
 
 // ParseResolvePath parses the path half of a resolver URL.
@@ -117,6 +124,14 @@ type searcher interface {
 	Search(ctx context.Context, mediaType, imdbID string, season, episode int) ([]aiostreams.Stream, error)
 }
 
+// freshSearcher is the optional ability to search past the client's own result
+// cache. A Fresh resolution exists because a previously-issued URL just failed;
+// handing it the cached result set that produced that URL would defeat the
+// point, so when the searcher can bypass its cache, Fresh does.
+type freshSearcher interface {
+	SearchFresh(ctx context.Context, mediaType, imdbID string, season, episode int) ([]aiostreams.Stream, error)
+}
+
 // Resolver answers playback-time resolution requests.
 type Resolver struct {
 	streams searcher
@@ -129,6 +144,39 @@ type Resolver struct {
 	// live is the liveness check, swappable so tests can drive both outcomes
 	// without standing up a provider. Nil means use the real one.
 	live func(ctx context.Context, rawURL string) error
+
+	// now is the clock for the reuse windows, injectable so tests can move
+	// time instead of sleeping through it.
+	now func() time.Time
+
+	// mu guards flights and probeFails.
+	mu sync.Mutex
+
+	// flights coalesces and briefly reuses resolutions per resolveKey. One
+	// entry is one resolution: callers arriving while it runs share its
+	// outcome, and callers arriving within resolvedTTL of it settling reuse
+	// the answer outright.
+	flights map[string]*flight
+
+	// probeFails remembers candidates that recently failed a liveness check,
+	// keyed by candidate URL.
+	probeFails map[string]probeFailure
+}
+
+// flight is one resolution, shared by every caller who wants the same answer.
+type flight struct {
+	done      chan struct{} // closed once the outcome is set
+	fresh     bool          // resolved past every cache; joinable by Fresh callers
+	stream    aiostreams.Stream
+	trace     Trace
+	err       error
+	expiresAt time.Time // set only on success; failures are never reused
+}
+
+// probeFailure is remembered evidence that a candidate was not serving.
+type probeFailure struct {
+	reason    string
+	expiresAt time.Time
 }
 
 // NewResolver builds a resolver over an AIOStreams client.
@@ -142,9 +190,12 @@ func NewResolverWith(streams searcher, log *slog.Logger) *Resolver {
 		log = slog.New(slog.DiscardHandler)
 	}
 	return &Resolver{
-		streams: streams,
-		log:     log,
-		probe:   &http.Client{Timeout: liveCheckTimeout},
+		streams:    streams,
+		log:        log,
+		probe:      &http.Client{Timeout: liveCheckTimeout},
+		now:        time.Now,
+		flights:    make(map[string]*flight),
+		probeFails: make(map[string]probeFailure),
 	}
 }
 
@@ -161,6 +212,28 @@ var ErrNoLookupKey = errors.New("plugin: request has no IMDb lookup key")
 // playback starts — enough to get past a run of dead links without turning a
 // missing title into a long stall.
 const liveChecks = 4
+
+// resolvedTTL bounds how long a verified answer is reused.
+//
+// A playback session is not one resolution: the media server re-resolves the
+// placeholder on every ffmpeg restart, which means every seek at minimum and
+// every stall recovery besides. Within this window that storm is answered from
+// memory, so a seek costs a redirect rather than a search and a probe pass.
+// The window is kept far short of any provider's link lifetime: this is
+// seek-storm absorption, not storage — nothing durable ever holds a stream
+// URL, and a fresh play after a quiet minute still resolves fresh.
+const resolvedTTL = 60 * time.Second
+
+// probeFailTTL bounds how long a candidate that just failed its liveness check
+// is skipped without being re-probed.
+//
+// The expensive probe outcome is failure: a dead host costs its full timeout,
+// and it is paid on the top-ranked candidate even when a healthy one sits
+// right below it. A candidate that was dead seconds ago is dead now — a 202
+// means the provider is still fetching, a timeout means the host is down — so
+// within this window the candidate is skipped on remembered evidence instead
+// of timing out again on every resolve.
+const probeFailTTL = 2 * time.Minute
 
 // liveCheckTimeout bounds one liveness check.
 //
@@ -183,6 +256,12 @@ const liveCheckTimeout = 3 * time.Second
 type Trace struct {
 	SearchMS int64 `json:"search_ms"`
 	VerifyMS int64 `json:"verify_ms"`
+
+	// Reused marks an answer served from the reuse window rather than
+	// resolved. Kept out of the latency picture: a reused answer took no time
+	// because it did no work, and folding its zeros into a median would let a
+	// seek-happy session mask a genuinely slow provider.
+	Reused bool `json:"reused,omitempty"`
 }
 
 // Resolve returns a directly playable URL for a request.
@@ -205,18 +284,134 @@ func (r *Resolver) Resolve(ctx context.Context, req ResolveRequest) (aiostreams.
 }
 
 // ResolveTraced is Resolve with a timing breakdown.
+//
+// Resolutions for the same unit are coalesced and briefly reused. A playback
+// session re-resolves its placeholder on every ffmpeg restart — each seek at
+// minimum — and answering that storm from memory is the difference between a
+// seek that starts instantly and one that waits out a search and a probe pass.
+// Reuse is bounded by resolvedTTL and bypassed by req.Fresh, so nothing
+// durable ever holds a stream URL.
 func (r *Resolver) ResolveTraced(ctx context.Context, req ResolveRequest) (aiostreams.Stream, Trace, error) {
-	var trace Trace
-
 	// AIOStreams accepts IMDb ids and nothing else: tmdb: and tvdb: ids return
 	// zero candidates against a live instance. Without a lookup key there is
 	// nothing to search for.
 	if req.IMDbID == "" {
-		return aiostreams.Stream{}, trace, ErrNoLookupKey
+		return aiostreams.Stream{}, Trace{}, ErrNoLookupKey
 	}
 
+	key := req.resolveKey()
+	r.mu.Lock()
+	if f, ok := r.flights[key]; ok {
+		select {
+		case <-f.done:
+			if !req.Fresh && f.err == nil && r.now().Before(f.expiresAt) {
+				r.mu.Unlock()
+				return f.stream, Trace{Reused: true}, nil
+			}
+			// Settled but stale, failed, or bypassed: lead a new resolution.
+		default:
+			if !req.Fresh || f.fresh {
+				r.mu.Unlock()
+				return r.await(ctx, f, false)
+			}
+			// A Fresh caller must not ride an ordinary flight: it exists
+			// because a URL that flight's caches may be about to re-serve
+			// just failed. Lead a new, fully-fresh flight instead; the
+			// ordinary one still settles for its own waiters.
+		}
+	}
+	f := &flight{done: make(chan struct{}), fresh: req.Fresh}
+	r.flights[key] = f
+	r.mu.Unlock()
+
+	// The resolution runs detached from the leader's own cancellation: the
+	// callers coalesced onto this flight are healthy, and one client hanging
+	// up must not hand every one of them a context error. The work stays
+	// bounded by its own budget, and every caller — leader included — still
+	// abandons its wait on its own ctx.
+	go func() {
+		flightCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), resolveBudget)
+		defer cancel()
+		stream, trace, err := r.resolveUncached(flightCtx, req)
+
+		r.mu.Lock()
+		f.stream, f.trace, f.err = stream, trace, err
+		if err == nil {
+			f.expiresAt = r.now().Add(resolvedTTL)
+		} else if r.flights[key] == f {
+			// Failures are not reused: the next caller gets a fresh attempt,
+			// not a replay of this one's bad luck. Guarded, because a Fresh
+			// flight may have replaced this slot mid-resolution — its entry
+			// must not be torn down by the flight it superseded.
+			delete(r.flights, key)
+		}
+		r.pruneExpiredLocked()
+		close(f.done)
+		r.mu.Unlock()
+	}()
+	return r.await(ctx, f, true)
+}
+
+// await blocks on a flight until it settles or the caller's own context ends.
+//
+// The leader's trace is returned as-is — that caller waited through the real
+// work. A follower's answer is marked Reused instead: the work happened once,
+// and recording each coalesced caller as a full resolution would count the
+// same latency into the median once per rider.
+func (r *Resolver) await(ctx context.Context, f *flight, leader bool) (aiostreams.Stream, Trace, error) {
+	select {
+	case <-f.done:
+		if leader || f.err != nil {
+			return f.stream, f.trace, f.err
+		}
+		trace := f.trace
+		trace.Reused = true
+		return f.stream, trace, nil
+	case <-ctx.Done():
+		return aiostreams.Stream{}, Trace{}, ctx.Err()
+	}
+}
+
+// resolveKey identifies one resolvable unit at one requested tier — the grain
+// at which an answer can be shared between callers.
+func (req ResolveRequest) resolveKey() string {
+	return strings.ToLower(req.MediaType) + "|" + strings.ToLower(req.ID.String()) + "|" +
+		strings.ToLower(req.IMDbID) + "|" +
+		strconv.Itoa(req.Season) + "|" + strconv.Itoa(req.Episode) + "|" +
+		strings.ToLower(strings.TrimSpace(req.Quality))
+}
+
+// pruneExpiredLocked drops settled flights and probe failures whose windows
+// have passed, keeping both maps bounded by what was touched within a TTL.
+// The caller holds r.mu.
+func (r *Resolver) pruneExpiredLocked() {
+	now := r.now()
+	for k, f := range r.flights {
+		select {
+		case <-f.done:
+			if !now.Before(f.expiresAt) {
+				delete(r.flights, k)
+			}
+		default:
+		}
+	}
+	for u, pf := range r.probeFails {
+		if !now.Before(pf.expiresAt) {
+			delete(r.probeFails, u)
+		}
+	}
+}
+
+// resolveUncached performs one full resolution: search, then verify.
+func (r *Resolver) resolveUncached(ctx context.Context, req ResolveRequest) (aiostreams.Stream, Trace, error) {
+	var trace Trace
+
 	searchStart := time.Now()
-	streams, err := r.streams.Search(ctx, req.MediaType, req.IMDbID, req.Season, req.Episode)
+	search := r.streams.Search
+	if fs, ok := r.streams.(freshSearcher); ok && req.Fresh {
+		search = fs.SearchFresh
+	}
+	streams, err := search(ctx, req.MediaType, req.IMDbID, req.Season, req.Episode)
 	trace.SearchMS = time.Since(searchStart).Milliseconds()
 	if err != nil {
 		return aiostreams.Stream{}, trace, err
@@ -242,7 +437,7 @@ func (r *Resolver) ResolveTraced(ctx context.Context, req ResolveRequest) (aiost
 		if len(candidates) == 0 {
 			continue
 		}
-		if picked, ok := r.firstLive(ctx, candidates); ok {
+		if picked, ok := r.firstLive(ctx, candidates, req.Fresh); ok {
 			trace.VerifyMS = time.Since(verifyStart).Milliseconds()
 			return picked, trace, nil
 		}
@@ -261,15 +456,28 @@ func (r *Resolver) ResolveTraced(ctx context.Context, req ResolveRequest) (aiost
 // When nothing verifies, the best candidate is returned anyway rather than
 // failing: an unverified stream may still play, and a definite failure is worse
 // than a probable success.
-func (r *Resolver) firstLive(ctx context.Context, candidates []aiostreams.Stream) (aiostreams.Stream, bool) {
+//
+// A candidate that failed a check within probeFailTTL is skipped on that
+// remembered evidence rather than re-probed — unless fresh demands the
+// re-probe. The expensive outcome is failure, and it recurs: a dead top-ranked
+// candidate would otherwise charge its full timeout to every resolve.
+func (r *Resolver) firstLive(ctx context.Context, candidates []aiostreams.Stream, fresh bool) (aiostreams.Stream, bool) {
 	checkCtx, cancel := context.WithCancel(ctx)
 	// Cancelling on the way out abandons checks still in flight: once the
 	// answer is known, the rest are wasted work against someone's provider.
 	defer cancel()
 
 	results := make([]chan error, len(candidates))
+	remembered := make([]bool, len(candidates))
 	for i := range candidates {
 		results[i] = make(chan error, 1)
+		if !fresh {
+			if reason, ok := r.recentProbeFailure(candidates[i].URL); ok {
+				remembered[i] = true
+				results[i] <- fmt.Errorf("%s (remembered)", reason)
+				continue
+			}
+		}
 		go func(i int) {
 			results[i] <- r.liveCheck(checkCtx, candidates[i].URL)
 		}(i)
@@ -281,7 +489,18 @@ func (r *Resolver) firstLive(ctx context.Context, candidates []aiostreams.Stream
 	for i := range candidates {
 		err := <-results[i]
 		if err == nil {
+			// A success can only come from a check that actually ran, and it
+			// supersedes any remembered failure: a provider that has finished
+			// fetching must not stay blacklisted for the rest of the window.
+			r.clearProbeFailure(candidates[i].URL)
 			return candidates[i], true
+		}
+		// Only a check that actually ran is evidence. A remembered failure
+		// must not refresh its own expiry — that would keep a candidate
+		// blacklisted forever on one observation — and a cancelled context
+		// says nothing about the candidate at all.
+		if !remembered[i] && ctx.Err() == nil {
+			r.rememberProbeFailure(candidates[i].URL, err)
 		}
 		r.log.Info("resolve: skipping a candidate that is not serving",
 			"resolution", candidates[i].Resolution,
@@ -291,6 +510,32 @@ func (r *Resolver) firstLive(ctx context.Context, candidates []aiostreams.Stream
 	r.log.Warn("resolve: no candidate verified as serving; returning the best one unchecked",
 		"checked", len(candidates))
 	return candidates[0], true
+}
+
+// recentProbeFailure reports whether url failed a liveness check within
+// probeFailTTL, and with what reason.
+func (r *Resolver) recentProbeFailure(url string) (string, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	pf, ok := r.probeFails[url]
+	if !ok || !r.now().Before(pf.expiresAt) {
+		return "", false
+	}
+	return pf.reason, true
+}
+
+// rememberProbeFailure records that url just failed a liveness check.
+func (r *Resolver) rememberProbeFailure(url string, err error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.probeFails[url] = probeFailure{reason: err.Error(), expiresAt: r.now().Add(probeFailTTL)}
+}
+
+// clearProbeFailure forgets a remembered failure after url verified as serving.
+func (r *Resolver) clearProbeFailure(url string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.probeFails, url)
 }
 
 // liveCheck runs the configured liveness check.

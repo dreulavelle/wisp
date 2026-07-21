@@ -162,12 +162,29 @@ func TestRecorderMedian(t *testing.T) {
 	for _, ms := range []int64{100, 200, 300, 400, 500} {
 		r.Record(Activity{TotalMS: ms})
 	}
-	resolved, failures, median := r.Stats()
-	if resolved != 5 || failures != 0 {
-		t.Errorf("resolved=%d failures=%d, want 5/0", resolved, failures)
+	resolved, reused, failures, median := r.Stats()
+	if resolved != 5 || reused != 0 || failures != 0 {
+		t.Errorf("resolved=%d reused=%d failures=%d, want 5/0/0", resolved, reused, failures)
 	}
 	if median != 300 {
 		t.Errorf("median = %d, want 300", median)
+	}
+}
+
+// A reused answer took no time because it did no work. Folding its zeros into
+// the median would let a seek-happy session mask a genuinely slow provider.
+func TestRecorderKeepsReusedAnswersOutOfTheMedian(t *testing.T) {
+	r := NewRecorder()
+	r.Record(Activity{TotalMS: 400})
+	for i := 0; i < 10; i++ {
+		r.Record(Activity{TotalMS: 0, Reused: true})
+	}
+	resolved, reused, _, median := r.Stats()
+	if resolved != 11 || reused != 10 {
+		t.Errorf("resolved=%d reused=%d, want 11/10", resolved, reused)
+	}
+	if median != 400 {
+		t.Errorf("median = %d, want the one full resolution's 400", median)
 	}
 }
 
