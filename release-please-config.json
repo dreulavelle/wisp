@@ -10,7 +10,8 @@
           "path": "cmd/silo-plugin-wisp/manifest.json",
           "jsonpath": "$.version"
         }
-      ]
+      ],
+      "draft": true
     }
   },
   "changelog-sections": [

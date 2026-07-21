@@ -59,16 +59,22 @@ jobs:
       - name: Generate the catalog feed
         run: python3 scripts/gen-repository.py "${{ steps.v.outputs.tag }}"
 
-      - name: Attach artifacts to the release
+      # This repo has immutable releases, so assets cannot be attached after
+      # publish. release-please therefore creates a draft; artifacts go on while
+      # it is still a draft, and publishing is the last step.
+      - name: Attach artifacts and publish
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release upload "${{ steps.v.outputs.tag }}" --clobber \
+          set -euo pipefail
+          tag="${{ steps.v.outputs.tag }}"
+          gh release upload "$tag" --clobber \
             dist/silo-plugin-wisp-linux-amd64 \
             dist/silo-plugin-wisp-linux-arm64 \
             dist/silo-plugin-wisp.zip \
             dist/checksums.txt \
             repository.json
+          gh release edit "$tag" --draft=false --latest
 
       # The raw-main URL is what operators give Silo, so it has to describe the
       # release that just shipped.
