@@ -127,7 +127,7 @@ func (rt *Router) adminStatus(w http.ResponseWriter, r *http.Request) {
 	// that has been up for weeks, a failure count from a fortnight ago would
 	// read as a live problem — the one question this panel exists to answer.
 	// counting_since gives the operator the denominator instead.
-	writeJSON(w, http.StatusOK, map[string]any{
+	status := map[string]any{
 		"version":           rt.version,
 		"resolver_ready":    rt.resolver != nil,
 		"uptime_seconds":    int(time.Since(rt.started).Seconds()),
@@ -136,7 +136,27 @@ func (rt *Router) adminStatus(w http.ResponseWriter, r *http.Request) {
 		"failures_total":    failures,
 		"counting_since":    rt.recorder.Since(),
 		"median_resolve_ms": median,
-	})
+	}
+
+	// New episodes are the one thing that arrives without anybody asking, so
+	// the dashboard has to show whether that is still happening. A pass that
+	// finds nothing looks exactly like a monitor that never runs, and the
+	// difference only shows up weeks later as episodes quietly missing.
+	if rt.monitor != nil {
+		last := rt.monitor.LastPass()
+		monitor := map[string]any{
+			"series_tracked": rt.monitor.TrackedSeries(),
+			"has_run":        last.Ran,
+		}
+		if last.Ran {
+			monitor["last_run_at"] = last.At
+			monitor["last_written"] = last.Written
+			monitor["last_failed"] = last.Failed
+		}
+		status["monitor"] = monitor
+	}
+
+	writeJSON(w, http.StatusOK, status)
 }
 
 func (rt *Router) adminPlaceholders(w http.ResponseWriter, r *http.Request) {

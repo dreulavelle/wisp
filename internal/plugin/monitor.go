@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	pluginv1 "github.com/Silo-Server/silo-plugin-sdk/pkg/pluginproto/silo/plugin/v1"
 )
@@ -34,6 +35,22 @@ type Monitor struct {
 	episodes EpisodeLister
 	pusher   *ScanPusher
 	log      *slog.Logger
+
+	mu   sync.Mutex
+	last PassResult
+}
+
+// PassResult describes the most recent fill-episodes pass.
+//
+// Recorded so an operator can tell "ran, found nothing" from "never ran".
+// Those look identical from outside, and for a feature whose whole job is to
+// notice new episodes, silence is the failure mode you most need to see.
+type PassResult struct {
+	At      time.Time `json:"at"`
+	Series  int       `json:"series"`
+	Written int       `json:"written"`
+	Failed  int       `json:"failed"`
+	Ran     bool      `json:"ran"`
 }
 
 // NewMonitor builds the scheduled-task handler.
@@ -57,6 +74,32 @@ func (m *Monitor) WithScanPusher(p *ScanPusher) *Monitor {
 	return m
 }
 
+// record stores the outcome of a pass.
+func (m *Monitor) record(r PassResult) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.last = r
+}
+
+// LastPass returns the most recent pass outcome.
+func (m *Monitor) LastPass() PassResult {
+	if m == nil {
+		return PassResult{}
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.last
+}
+
+// TrackedSeries reports how many series the monitor is watching, so the
+// dashboard can show it without waiting for a pass.
+func (m *Monitor) TrackedSeries() int {
+	if m == nil {
+		return 0
+	}
+	return len(m.trackedSeries())
+}
+
 // series is one show Wisp already tracks, derived from its placeholders.
 type series struct {
 	id      MediaID
@@ -68,11 +111,29 @@ type series struct {
 	have    map[[2]int]bool // season/episode pairs already written
 }
 
+// isFillEpisodesKey reports whether a task key addresses this task.
+//
+// The host qualifies a plugin's task key with the installation it belongs to —
+// "plugin:8:fill-episodes" — because two installations of the same plugin would
+// otherwise collide. Matching only the bare capability id meant every scheduled
+// run was rejected with "unknown task", so episodes were never filled in at
+// all, and the failure was invisible: the task simply recorded an error nobody
+// was looking at.
+//
+// Both forms are accepted. An empty key means "run your only task", which is
+// what a host with a single scheduled capability sends.
+func isFillEpisodesKey(key string) bool {
+	if key == "" || key == TaskFillEpisodes {
+		return true
+	}
+	return strings.HasSuffix(key, ":"+TaskFillEpisodes)
+}
+
 // Run fills in episodes that have aired since the last pass.
 //
 // Implements pluginv1.ScheduledTaskServer.
 func (m *Monitor) Run(ctx context.Context, req *pluginv1.RunScheduledTaskRequest) (*pluginv1.RunScheduledTaskResponse, error) {
-	if key := req.GetTaskKey(); key != "" && key != TaskFillEpisodes {
+	if key := req.GetTaskKey(); !isFillEpisodesKey(key) {
 		return nil, fmt.Errorf("monitor: unknown task %q", key)
 	}
 	if m.writer == nil || m.episodes == nil {
@@ -82,6 +143,8 @@ func (m *Monitor) Run(ctx context.Context, req *pluginv1.RunScheduledTaskRequest
 
 	shows := m.trackedSeries()
 	if len(shows) == 0 {
+		m.record(PassResult{At: time.Now(), Ran: true})
+		m.log.Info("monitor: pass complete; no series are being tracked yet")
 		return &pluginv1.RunScheduledTaskResponse{}, nil
 	}
 
@@ -140,10 +203,13 @@ func (m *Monitor) Run(ctx context.Context, req *pluginv1.RunScheduledTaskRequest
 		}
 	}
 
-	if written > 0 || failed > 0 {
-		m.log.Info("monitor: pass complete",
-			"series", len(shows), "written", written, "failed", failed)
-	}
+	m.record(PassResult{At: time.Now(), Series: len(shows), Written: written, Failed: failed, Ran: true})
+	// Logged unconditionally. A pass that found nothing is the normal case and
+	// still needs to be visible, or an operator cannot distinguish a working
+	// monitor from one that never fires — which is exactly the bug that hides
+	// here, since the task shipped bound to a startup-only trigger.
+	m.log.Info("monitor: pass complete",
+		"series", len(shows), "written", written, "failed", failed)
 	// One push for the whole pass. A pass that fills in a dozen shows should
 	// cost the host one ingest, not one per episode.
 	m.pusher.Push(ctx, pushed)
@@ -263,6 +329,20 @@ func (h *MonitorHolder) Set(m *Monitor) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.monitor = m
+}
+
+// LastPass reports the configured monitor's most recent pass.
+func (h *MonitorHolder) LastPass() PassResult {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.monitor.LastPass()
+}
+
+// TrackedSeries reports how many series the configured monitor watches.
+func (h *MonitorHolder) TrackedSeries() int {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.monitor.TrackedSeries()
 }
 
 // Run forwards to the configured monitor, or does nothing if there is none.

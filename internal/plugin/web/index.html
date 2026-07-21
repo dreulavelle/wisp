@@ -113,7 +113,8 @@
   .tile dd { margin: 0; font: 500 17px/1.1 var(--mono); letter-spacing: -0.01em; }
   .tile dd.ok { color: var(--wisp); }
   .tile dd.bad { color: var(--fault); }
-  .tile dd small { font-size: 11px; color: var(--dim); font-weight: 400; letter-spacing: 0; }
+  .tile dd small { display: block; font-size: 11px; color: var(--dim); font-weight: 400; letter-spacing: 0; }
+  .muted { color: var(--dim); }
 
   table { width: 100%; border-collapse: collapse; font-size: 13px; }
   thead th {
@@ -261,15 +262,41 @@
     return i < 0 ? ["", p] : [p.slice(0, i + 1), p.slice(i + 1)];
   }
 
+  // New episodes arrive without anyone asking, so the one thing worth showing
+  // is whether that is still happening. A pass that finds nothing looks exactly
+  // like a monitor that never runs, and the difference only surfaces weeks
+  // later as episodes quietly missing — so "never run" is called out rather
+  // than shown as a reassuring zero.
+  function newEpisodesTile(m) {
+    if (!m) return ["New episodes", `<span class="muted">—</span>`];
+    if (!m.has_run) {
+      return ["New episodes", `<span class="bad">never checked</span>`];
+    }
+    const n = m.series_tracked ?? 0;
+    const shows = `${n} show${n === 1 ? "" : "s"}`;
+    return ["New episodes", `<span class="ok">${ago(m.last_run_at)}</span><small>${shows}</small>`];
+  }
+
+  // Relative time, because "checked 4 minutes ago" answers the question and a
+  // timestamp makes the reader do the subtraction.
+  function ago(iso) {
+    if (!iso) return "never";
+    const secs = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000);
+    if (secs < 90) return "just now";
+    if (secs < 5400) return `${Math.round(secs / 60)}m ago`;
+    if (secs < 172800) return `${Math.round(secs / 3600)}h ago`;
+    return `${Math.round(secs / 86400)}d ago`;
+  }
+
   function renderTiles(s) {
     const healthy = s.resolver_ready;
     $("tiles").innerHTML = [
       ["Resolver", healthy ? `<span class="ok">ready</span>` : `<span class="bad">not configured</span>`],
       ["Placeholders", `${s.placeholders ?? 0}`],
+      newEpisodesTile(s.monitor),
       ["Resolved", `${s.resolved_total ?? 0}`],
       ["Median resolve", ms(s.median_resolve_ms)],
       ["Failures", `${s.failures_total ?? 0}`],
-      ["Uptime", `${Math.floor((s.uptime_seconds ?? 0) / 3600)}<small>h</small>`],
     ].map(([k, v]) => `<div class="tile"><dt>${k}</dt><dd>${v}</dd></div>`).join("");
     $("version").textContent = s.version ? `v${s.version}` : "";
   }

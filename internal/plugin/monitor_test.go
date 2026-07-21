@@ -317,3 +317,51 @@ func TestMonitorKeepsNewEpisodesInTheRootTheShowAlreadyLivesIn(t *testing.T) {
 		t.Error("the show was split across two roots")
 	}
 }
+
+// The host qualifies a plugin's task key with the installation it belongs to,
+// because two installations of the same plugin would otherwise collide.
+// Matching only the bare capability id meant every scheduled run was rejected
+// with "unknown task" — so episodes were never filled in, and the failure was
+// invisible because the task just recorded an error nobody was watching.
+func TestFillEpisodesAcceptsTheHostsQualifiedTaskKey(t *testing.T) {
+	for _, key := range []string{
+		"",                        // host with a single scheduled capability
+		TaskFillEpisodes,          // bare capability id
+		"plugin:8:fill-episodes",  // what Silo actually sends
+		"plugin:12:fill-episodes", // a different installation of this plugin
+	} {
+		if !isFillEpisodesKey(key) {
+			t.Errorf("task key %q was rejected; scheduled runs would fail", key)
+		}
+	}
+
+	// Another plugin's task must still be refused: a task meant for someone
+	// else silently succeeding is worse than an error.
+	for _, key := range []string{
+		"plugin:8:some-other-task",
+		"fill-episodes-extra",
+		"prefix-fill-episodes",
+	} {
+		if isFillEpisodesKey(key) {
+			t.Errorf("task key %q was accepted; it is not this task", key)
+		}
+	}
+}
+
+// End to end through the holder, with the key Silo really sends.
+func TestMonitorRunsForTheQualifiedKey(t *testing.T) {
+	root := t.TempDir()
+	w := NewWriter(root, "http://127.0.0.1:8080/api/v1/plugins/8", nil)
+	lib := NewLibrary()
+	holder := NewMonitorHolder()
+	holder.Set(NewMonitor(lib, w, &stubEpisodes{}, nil))
+
+	if _, err := holder.Run(context.Background(), &pluginv1.RunScheduledTaskRequest{
+		TaskKey: "plugin:8:fill-episodes",
+	}); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if !holder.LastPass().Ran {
+		t.Error("the pass did not run for the host's own task key")
+	}
+}

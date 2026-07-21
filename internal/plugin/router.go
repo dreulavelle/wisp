@@ -39,6 +39,7 @@ type Router struct {
 	library  *Library
 	recorder *Recorder
 	signer   *Signer
+	monitor  *MonitorHolder
 }
 
 // RouterOptions configures a Router.
@@ -49,6 +50,8 @@ type RouterOptions struct {
 	Settings Settings
 	Library  *Library
 	Recorder *Recorder
+	// Monitor surfaces the fill-episodes pass on the dashboard. Optional.
+	Monitor *MonitorHolder
 	// Signer authenticates resolver requests. Nil disables verification, which
 	// is only appropriate in tests: the resolver route is public, so an
 	// unsigned deployment lets anyone mint stream links.
@@ -80,6 +83,7 @@ func NewRouterWith(opts RouterOptions) *Router {
 		library:  opts.Library,
 		recorder: opts.Recorder,
 		signer:   opts.Signer,
+		monitor:  opts.Monitor,
 	}
 }
 

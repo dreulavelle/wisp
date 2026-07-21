@@ -1,6 +1,7 @@
 package plugin
 
 import (
+	"context"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -9,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	pluginv1 "github.com/Silo-Server/silo-plugin-sdk/pkg/pluginproto/silo/plugin/v1"
 	"github.com/dreulavelle/wisp/internal/aiostreams"
 )
 
@@ -230,5 +232,54 @@ func TestDashboardExplainsHowToConfigure(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Errorf("dashboard does not mention %q", want)
 		}
+	}
+}
+
+// A pass that finds nothing looks exactly like a monitor that never runs, and
+// the difference only shows up weeks later as episodes quietly missing. The
+// dashboard has to be able to tell them apart.
+func TestStatusReportsWhetherEpisodesHaveEverBeenChecked(t *testing.T) {
+	holder := NewMonitorHolder()
+	rt := NewRouterWith(RouterOptions{
+		Library: NewLibrary(), Recorder: NewRecorder(), Monitor: holder,
+	})
+
+	get := func() map[string]any {
+		rec := httptest.NewRecorder()
+		rt.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/admin/api/status", nil))
+		var body map[string]any
+		if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		return body
+	}
+
+	m, ok := get()["monitor"].(map[string]any)
+	if !ok {
+		t.Fatal("status carries no monitor section")
+	}
+	if m["has_run"] != false {
+		t.Errorf("has_run = %v before any pass; want false", m["has_run"])
+	}
+
+	// A configured monitor over an empty library has still genuinely run: it
+	// looked and found nothing, which is the normal case and must be
+	// distinguishable from never looking.
+	holder.Set(NewMonitor(
+		NewLibrary(),
+		NewWriter(t.TempDir(), "http://127.0.0.1:8080/api/v1/plugins/1", nil),
+		&stubEpisodes{},
+		nil,
+	))
+	if _, err := holder.Run(context.Background(), &pluginv1.RunScheduledTaskRequest{}); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	m, _ = get()["monitor"].(map[string]any)
+	if m["has_run"] != true {
+		t.Errorf("has_run = %v after a pass; want true", m["has_run"])
+	}
+	if _, present := m["last_run_at"]; !present {
+		t.Error("no last_run_at after a pass; the dashboard cannot say when it checked")
 	}
 }

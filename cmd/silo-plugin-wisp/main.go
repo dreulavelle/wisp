@@ -131,6 +131,7 @@ func (s *runtimeServer) Configure(ctx context.Context, req *pluginv1.ConfigureRe
 		Settings: plugin.Settings{AIOStreamsHost: host, LibraryPath: next.libraryPath},
 		Library:  s.library,
 		Recorder: s.recorder,
+		Monitor:  s.monitor,
 		Signer:   signer,
 	}).Handler())
 	// Requests can only produce placeholders once a library path is known, so
