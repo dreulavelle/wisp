@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.1.1](https://github.com/dreulavelle/wisp/compare/v3.1.0...v3.1.1) (2026-07-21)
+
+
+### Bug Fixes
+
+* **plugin:** heal placeholders that address a retired installation id ([494a4b1](https://github.com/dreulavelle/wisp/commit/494a4b1b720ba809d1e3a3f47de5dbe221cef271))
+
 ## [3.1.0](https://github.com/dreulavelle/wisp/compare/v3.0.0...v3.1.0) (2026-07-21)
 
 
