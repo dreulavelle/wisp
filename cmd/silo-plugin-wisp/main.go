@@ -168,6 +168,16 @@ func main() {
 	router := plugin.NewRequestRouter(nil)
 	monitor := plugin.NewMonitorHolder()
 
+	// Serve the dashboard immediately, before any configuration arrives. It
+	// reports an unconfigured resolver rather than refusing to load: the page
+	// that explains what to set up must not itself require setup.
+	routes.SetHandler(plugin.NewRouterWith(plugin.RouterOptions{
+		Log:      log,
+		Version:  manifest.GetVersion(),
+		Library:  library,
+		Recorder: recorder,
+	}).Handler())
+
 	sdkruntime.Serve(sdkruntime.ServeConfig{
 		Servers: sdkruntime.CapabilityServers{
 			Runtime: &runtimeServer{

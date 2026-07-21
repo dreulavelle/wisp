@@ -188,3 +188,47 @@ func TestLibraryAddPreservesHistory(t *testing.T) {
 		t.Errorf("quality = %q, want the updated value", items[0].Quality)
 	}
 }
+
+// The dashboard must load before any configuration exists. Gating it behind a
+// configured resolver makes the page that explains what to set up unreachable
+// until you have already set it up — which is exactly backwards.
+func TestDashboardLoadsBeforeConfiguration(t *testing.T) {
+	rt := NewRouterWith(RouterOptions{Log: slog.New(slog.DiscardHandler)}) // no resolver
+	h := rt.Handler()
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/admin/", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("dashboard status = %d, want 200 while unconfigured", rec.Code)
+	}
+
+	status := httptest.NewRecorder()
+	h.ServeHTTP(status, httptest.NewRequest(http.MethodGet, "/admin/api/status", nil))
+	if status.Code != http.StatusOK {
+		t.Fatalf("status endpoint = %d, want 200 while unconfigured", status.Code)
+	}
+
+	var body map[string]any
+	if err := json.Unmarshal(status.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	// It must say so plainly rather than pretending to be healthy.
+	if body["resolver_ready"] != false {
+		t.Errorf("resolver_ready = %v, want false while unconfigured", body["resolver_ready"])
+	}
+}
+
+// The page has to tell an operator what to do about it.
+func TestDashboardExplainsHowToConfigure(t *testing.T) {
+	rt := NewRouterWith(RouterOptions{Log: slog.New(slog.DiscardHandler)})
+
+	rec := httptest.NewRecorder()
+	rt.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/admin/", nil))
+
+	body := rec.Body.String()
+	for _, want := range []string{"Not configured", "AIOStreams URL", "library path"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("dashboard does not mention %q", want)
+		}
+	}
+}

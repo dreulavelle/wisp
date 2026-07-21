@@ -197,6 +197,12 @@ except Exception: print("")' 2>/dev/null)"
     curl -s -X PUT "$BASE/api/v1/admin/plugins/installations/$INSTALL_ID" "${AUTH[@]}" \
       -H 'Content-Type: application/json' -d '{"enabled":true}' >/dev/null 2>&1 || true
 
+    # The dashboard must be reachable before configuration, or the page that
+    # explains what to configure cannot be read until it is already configured.
+    PRECFG="$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/v1/plugins/$INSTALL_ID/admin/" "${AUTH[@]}" 2>/dev/null || true)"
+    [[ "$PRECFG" == "200" ]] && pass "dashboard loads before configuration" \
+      || fail "dashboard returned $PRECFG before configuration"
+
     # Configure triggers a plugin restart, so give it a moment to come back.
     for _ in $(seq 1 15); do
       [[ "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/v1/plugins/$INSTALL_ID/healthz" 2>/dev/null)" == "200" ]] && break

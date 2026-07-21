@@ -173,6 +173,14 @@
   .hint { font-size: 12px; color: var(--dim); margin: 10px 0 0; line-height: 1.55; }
   .hint a { color: var(--cold); }
 
+  /* Setup notice: the one place amber is used for something that is not a
+     resolved stream, because an unconfigured plugin is the one state that
+     genuinely needs attention. */
+  .notice { border: 1px solid var(--wisp-dim); border-left: 2px solid var(--wisp); border-radius: var(--r); padding: 14px 16px; background: var(--surface); }
+  .notice .eyebrow { display: block; color: var(--wisp); margin-bottom: 7px; }
+  .notice p { margin: 0; font-size: 13px; line-height: 1.6; color: var(--dim); }
+  .notice b { color: var(--text); font-weight: 500; }
+
   .empty { border: 1px dashed var(--line); border-radius: var(--r); padding: 26px 20px; text-align: center; }
   .empty p { margin: 0 0 6px; font: 400 13px/1.5 var(--sans); color: var(--dim); }
   .empty .eyebrow { display: block; margin-bottom: 10px; }
@@ -193,6 +201,8 @@
 
 <main>
   <div class="col">
+    <section id="setup" class="notice" hidden></section>
+
     <section>
       <span class="eyebrow">Health</span>
       <dl class="tiles" id="tiles"></dl>
@@ -311,6 +321,20 @@
     }).join("")}</div>`;
   }
 
+  function renderSetupNotice(status) {
+    const el = $("setup");
+    if (status.resolver_ready) {
+      el.hidden = true;
+      return;
+    }
+    el.hidden = false;
+    el.innerHTML = `
+      <span class="eyebrow">Not configured</span>
+      <p>Wisp needs an AIOStreams URL and a library path before it can resolve anything.
+         Set them in Silo under <b>Plugins &rarr; Wisp</b>, then point a Silo library at
+         that same path.</p>`;
+  }
+
   function renderSettings(s) {
     const row = (label, value, unset) =>
       `<div class="field"><label>${label}</label><div class="val${value ? "" : " unset"}">${esc(value || unset)}</div></div>`;
@@ -328,6 +352,7 @@
       api("/settings").catch(() => ({})),
     ]);
     renderTiles(status);
+    renderSetupNotice(status);
     renderPlaceholders(placeholders.items || placeholders || []);
     renderActivity(activity.items || activity || []);
     renderSettings(settings);
