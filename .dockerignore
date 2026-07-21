@@ -1,9 +1,0 @@
-.git
-.github
-data/
-*.db
-*.db-shm
-*.db-wal
-wisp
-README.md
-LICENSE
