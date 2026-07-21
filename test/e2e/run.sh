@@ -55,8 +55,12 @@ FAILURES=0
 cleanup() {
   step "Tearing down"
   rm -f "$HERE/stub-bin" "$HERE/fixture-bin" "$HERE/repository.e2e.json"
+  # The library is written by the container's user, so empty it from in there
+  # while the container still exists — after `down` there is nothing left to
+  # exec into and the host cannot remove those files.
+  [[ -n "${CID:-}" ]] && docker exec "$CID" sh -c 'rm -rf /library/*' 2>/dev/null || true
   docker compose -p "$PROJECT" down -v --remove-orphans >/dev/null 2>&1 || true
-  rm -rf "$HERE/library"
+  rm -rf "$HERE/library" 2>/dev/null || true
 }
 trap cleanup EXIT
 
@@ -79,7 +83,9 @@ fi
 
 # ---------------------------------------------------------------------------
 step "Starting Silo"
-rm -rf "$HERE/library"
+# A previous run's library may be owned by the container's user, so tolerate a
+# failure to remove it from the host; the container clears it on teardown.
+rm -rf "$HERE/library" 2>/dev/null || true
 mkdir -p "$HERE/library"
 docker compose -p "$PROJECT" up -d >/dev/null 2>&1
 for _ in $(seq 1 90); do
@@ -242,7 +248,13 @@ fi
 step "Writing placeholders with the real writer"
 # Produced by production code, not hand-rolled fixture text: a placeholder the
 # real writer cannot produce is a bug this test should catch.
-"$HERE/fixture-bin" -root "$HERE/library" -resolver-base "$RESOLVER_BASE" \
+# Runs inside the container, as the plugin itself would: the plugin creates the
+# library roots on Configure, owned by the container's user, so a host-side
+# writer cannot get into them. Writing from in here is also simply more
+# faithful — in production nothing outside the container ever writes a
+# placeholder.
+docker cp "$HERE/fixture-bin" "$CID:/tmp/fixture" >/dev/null
+docker exec "$CID" /tmp/fixture -root /library -resolver-base "$RESOLVER_BASE" \
   -aiostreams-url "$AIO_URL" -aiostreams-password "$AIO_PASS" -quality 1080p \
   > /tmp/wisp-e2e-fixtures.txt 2>/tmp/wisp-e2e-fixture-err.txt \
   && pass "wrote $(wc -l < /tmp/wisp-e2e-fixtures.txt) placeholder(s)" \
@@ -251,7 +263,8 @@ sed 's/^/        /' /tmp/wisp-e2e-fixtures.txt
 
 # ---------------------------------------------------------------------------
 step "Creating libraries and scanning"
-for spec in "E2E Movies|movie|/library/Movies" "E2E Shows|series|/library/Shows"; do
+for spec in "E2E Movies|movie|/library/movies" "E2E Shows|series|/library/tv" \
+            "E2E Anime Movies|movie|/library/anime/movies" "E2E Anime Shows|series|/library/anime/shows"; do
   IFS='|' read -r name type path <<< "$spec"
   curl -sf -X POST "$BASE/api/v1/libraries" "${AUTH[@]}" -H 'Content-Type: application/json' \
     -d "{\"name\":\"$name\",\"type\":\"$type\",\"paths\":[\"$path\"]}" >/dev/null 2>&1 || true
@@ -261,14 +274,19 @@ LIB_COUNT="$(psql_q "select count(*) from media_folders;")"
 
 curl -sf -X POST "$BASE/api/v1/scan" "${AUTH[@]}" -H 'Content-Type: application/json' -d '{}' >/dev/null || true
 
+# Wait for EVERY placeholder, not merely the first. Breaking as soon as one row
+# appears leaves the count mid-scan, which then makes the rescan-stability check
+# below compare a partial baseline against a complete one and report a spurious
+# change.
+WROTE="$(wc -l < /tmp/wisp-e2e-fixtures.txt)"
 FOUND=0
 for _ in $(seq 1 45); do
   FOUND="$(psql_q "select count(*) from media_files where file_path like '%.strm';")"
-  [[ "${FOUND:-0}" -ge 1 ]] && break
+  [[ "${FOUND:-0}" -ge "$WROTE" ]] && break
   sleep 2
 done
-[[ "${FOUND:-0}" -ge 1 ]] && pass "scanner created $FOUND row(s) for placeholders" \
-  || fail "scanner never created a row for a .strm placeholder"
+[[ "${FOUND:-0}" -ge "$WROTE" ]] && pass "scanner created $FOUND row(s) for $WROTE placeholder(s)" \
+  || fail "scanner found $FOUND row(s), want $WROTE"
 
 # ---------------------------------------------------------------------------
 step "Checking placeholders were NOT probed"

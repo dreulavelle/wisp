@@ -64,7 +64,7 @@ func TestFulfillMovie(t *testing.T) {
 		t.Errorf("external id = %q, want the canonical identity", got)
 	}
 
-	want := filepath.Join(root, "Movies", "The Matrix (1999) [tmdb-603]", "The Matrix (1999) [2160p].strm")
+	want := filepath.Join(root, rootMovies, "The Matrix (1999) [tmdb-603]", "The Matrix (1999) [2160p].strm")
 	if _, err := os.Stat(want); err != nil {
 		t.Errorf("placeholder not written at %s: %v", want, err)
 	}
@@ -107,9 +107,9 @@ func TestFulfillSeriesExpandsToEpisodes(t *testing.T) {
 	}
 
 	for _, rel := range []string{
-		"Shows/Severance (2022) [tvdb-371980]/Season 01/Severance (2022) S01E01 [1080p].strm",
-		"Shows/Severance (2022) [tvdb-371980]/Season 01/Severance (2022) S01E02 [1080p].strm",
-		"Shows/Severance (2022) [tvdb-371980]/Season 02/Severance (2022) S02E01 [1080p].strm",
+		"tv/Severance (2022) [tvdb-371980]/Season 01/Severance (2022) S01E01 [1080p].strm",
+		"tv/Severance (2022) [tvdb-371980]/Season 01/Severance (2022) S01E02 [1080p].strm",
+		"tv/Severance (2022) [tvdb-371980]/Season 02/Severance (2022) S02E01 [1080p].strm",
 	} {
 		if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(rel))); err != nil {
 			t.Errorf("missing placeholder %s", rel)
@@ -243,7 +243,7 @@ func TestFulfillWithNoQualityRequested(t *testing.T) {
 	if lib.Count() != 1 {
 		t.Errorf("library tracks %d placeholders, want 1", lib.Count())
 	}
-	want := filepath.Join(root, "Movies", "AnyQuality (2020) [tmdb-1]", "AnyQuality (2020).strm")
+	want := filepath.Join(root, rootMovies, "AnyQuality (2020) [tmdb-1]", "AnyQuality (2020).strm")
 	if _, err := os.Stat(want); err != nil {
 		t.Errorf("placeholder not written at %s", want)
 	}
@@ -353,7 +353,7 @@ func TestFulfillDerivesMissingIdentity(t *testing.T) {
 	if lib.Count() != 1 {
 		t.Errorf("wrote %d placeholders, want 1", lib.Count())
 	}
-	want := filepath.Join(root, "Shows", "Game of Thrones (2011) [tvdb-121361]", "Season 01",
+	want := filepath.Join(root, rootShows, "Game of Thrones (2011) [tvdb-121361]", "Season 01",
 		"Game of Thrones (2011) S01E01 [1080p].strm")
 	if _, err := os.Stat(want); err != nil {
 		t.Errorf("placeholder not written at the derived identity: %s", want)

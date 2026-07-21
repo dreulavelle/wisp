@@ -66,7 +66,7 @@
             "label": "Library Path",
             "control": "ADMIN_FORM_CONTROL_TEXT",
             "required": true,
-            "description": "Directory where Wisp writes .strm placeholders. Silo must have a library pointed at this same path.",
+            "description": "Directory where Wisp writes .strm placeholders. Must be writable by Silo. Wisp creates movies/, tv/, anime/movies/ and anime/shows/ under it — add a Silo library for each root you want to use.",
             "placeholder": "/library"
           }
         ]

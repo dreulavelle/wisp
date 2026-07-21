@@ -67,8 +67,25 @@ func ParsePlaceholder(path string) (Placeholder, error) {
 		Season:    req.Season,
 		Episode:   req.Episode,
 		Quality:   strings.TrimSpace(q.Get("quality")),
+		Anime:     isAnimePath(path),
 		CreatedAt: info.ModTime(),
 	}, nil
+}
+
+// isAnimePath reports whether a placeholder sits under an anime root.
+//
+// The path is the storage for this: a placeholder's category was decided when
+// it was written, and reading it back rather than re-deriving it is what keeps
+// a later metadata correction from relocating an item already in someone's
+// library.
+func isAnimePath(path string) bool {
+	slashed := filepath.ToSlash(path)
+	for _, root := range []string{rootAnimeMovies, rootAnimeShows} {
+		if strings.Contains(slashed, "/"+root+"/") {
+			return true
+		}
+	}
+	return false
 }
 
 // Rebuild repopulates the index by walking a library root.

@@ -31,6 +31,7 @@ type Intake struct {
 	library  *Library
 	episodes EpisodeLister
 	identity IdentityResolver
+	anime    AnimeClassifier
 	log      *slog.Logger
 }
 
@@ -40,6 +41,13 @@ func NewIntake(writer *Writer, library *Library, episodes EpisodeLister, log *sl
 		log = slog.New(slog.DiscardHandler)
 	}
 	return &Intake{writer: writer, library: library, episodes: episodes, log: log}
+}
+
+// WithAnimeClassifier enables routing anime into its own library roots. When
+// unset, everything is written to the general roots.
+func (i *Intake) WithAnimeClassifier(c AnimeClassifier) *Intake {
+	i.anime = c
+	return i
 }
 
 // WithIdentityResolver enables deriving a missing canonical id from the IMDb id
@@ -142,6 +150,13 @@ func (i *Intake) writeFor(ctx context.Context, mediaType string, desc *pluginv1.
 		ID:        id,
 		IMDbID:    imdb,
 		Quality:   quality,
+	}
+
+	// Classified once here, then carried onto every placeholder this request
+	// produces — including each episode of a series, which must not end up
+	// split across two roots because a lookup flapped mid-fan-out.
+	if i.anime != nil {
+		base.Anime = i.anime.IsAnime(ctx, mediaType, imdb)
 	}
 
 	if mediaType == "movie" {

@@ -50,6 +50,7 @@ type series struct {
 	title   string
 	year    int
 	quality string
+	anime   bool            // which library root this show already lives in
 	have    map[[2]int]bool // season/episode pairs already written
 }
 
@@ -102,6 +103,10 @@ func (m *Monitor) Run(ctx context.Context, req *pluginv1.RunScheduledTaskRequest
 				Season:    ep.Season,
 				Episode:   ep.Episode,
 				Quality:   s.quality,
+				// Inherited from the placeholders already on disk, never
+				// re-derived: a show must not start filing new episodes into a
+				// different root than the ones already in the library.
+				Anime: s.anime,
 			})
 			if err != nil {
 				m.log.Warn("monitor: write failed",
@@ -145,7 +150,7 @@ func (m *Monitor) trackedSeries() []series {
 			title, year := titleFromPath(p.Path)
 			s = &series{
 				id: p.ID, imdb: p.IMDbID, title: title, year: year,
-				quality: p.Quality, have: map[[2]int]bool{},
+				quality: p.Quality, anime: p.Anime, have: map[[2]int]bool{},
 			}
 			byID[key] = s
 		}

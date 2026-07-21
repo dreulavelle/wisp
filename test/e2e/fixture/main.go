@@ -42,6 +42,15 @@ func main() {
 			Quality:   *quality,
 		},
 		{
+			MediaType: "movie",
+			Title:     "E2E Anime Movie",
+			Year:      2001,
+			ID:        plugin.MediaID{Source: plugin.SourceTMDB, Value: "129"},
+			IMDbID:    "tt0245429",
+			Quality:   *quality,
+			Anime:     true,
+		},
+		{
 			MediaType: "series",
 			Title:     "E2E Show",
 			Year:      2024,

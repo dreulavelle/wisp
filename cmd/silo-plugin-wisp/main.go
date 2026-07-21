@@ -133,11 +133,23 @@ func (s *runtimeServer) Configure(_ context.Context, req *pluginv1.ConfigureRequ
 			s.log.Info("configure: library index rebuilt", "adopted", adopted, "skipped", skipped)
 		}
 
+		// Create the library roots up front. An operator has to point a Silo
+		// library at each of these before requesting anything, and Silo cannot
+		// be pointed at a directory that does not exist yet.
+		if created, err := writer.EnsureRoots(); err != nil {
+			s.log.Error("configure: could not create the library roots", "error", err)
+		} else if len(created) > 0 {
+			s.log.Info("configure: created library roots", "roots", created, "under", next.libraryPath)
+		}
+
 		// Episode numbering comes from Cinemeta, whose series data is
 		// TVDB-derived, so seasons and episodes line up with what media servers
-		// expect without needing a TVDB key of our own.
+		// expect without needing a TVDB key of our own. The same service backs
+		// the anime classifier.
 		meta := plugin.NewMetadataAdapter(metadata.New())
-		s.router.SetIntake(plugin.NewIntake(writer, s.library, meta, s.log).WithIdentityResolver(meta))
+		s.router.SetIntake(plugin.NewIntake(writer, s.library, meta, s.log).
+			WithIdentityResolver(meta).
+			WithAnimeClassifier(meta))
 		s.monitor.Set(plugin.NewMonitor(s.library, writer, meta, s.log))
 	} else {
 		s.log.Warn("configure: no library path set; requests cannot create placeholders")

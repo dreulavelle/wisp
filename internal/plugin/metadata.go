@@ -18,6 +18,14 @@ type IdentityResolver interface {
 	ProviderIDs(ctx context.Context, mediaType, imdbID string) (tvdb, tmdb string, err error)
 }
 
+// AnimeClassifier decides which library root a title belongs in.
+//
+// Narrowed to one call so intake can be tested without a metadata service, and
+// so the decision has exactly one place it can be made.
+type AnimeClassifier interface {
+	IsAnime(ctx context.Context, mediaType, imdbID string) bool
+}
+
 // MetadataAdapter bridges Wisp's metadata service to the interfaces intake
 // needs.
 //
@@ -61,6 +69,16 @@ func (m *MetadataAdapter) ReleasedEpisodes(ctx context.Context, imdbID string) (
 		out = append(out, EpisodeRef{Season: e.Season, Episode: e.Number})
 	}
 	return out, nil
+}
+
+// IsAnime reports whether a title belongs in the anime roots.
+//
+// Deliberately conservative: it requires the Animation genre AND a positive
+// Japanese signal, so Western animation stays out. Misfiling Pixar as anime is
+// the more visible error of the two, and an unclassified anime still plays
+// perfectly — it just sits in the general library.
+func (m *MetadataAdapter) IsAnime(ctx context.Context, mediaType, imdbID string) bool {
+	return m.svc.AnimeHeuristic(ctx, mediaType, imdbID)
 }
 
 // ProviderIDs returns the TVDB and TMDB ids for an IMDb id.

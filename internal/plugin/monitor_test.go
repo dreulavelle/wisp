@@ -57,7 +57,7 @@ func TestMonitorWritesNewlyAiredEpisodes(t *testing.T) {
 	if lib.Count() != 3 {
 		t.Fatalf("library has %d placeholders, want 3", lib.Count())
 	}
-	want := filepath.Join(root, "Shows", "Demo Show (2024) [tvdb-999]", "Season 01",
+	want := filepath.Join(root, rootShows, "Demo Show (2024) [tvdb-999]", "Season 01",
 		"Demo Show (2024) S01E03 [1080p].strm")
 	if _, err := os.Stat(want); err != nil {
 		t.Errorf("new episode not written at %s", want)
@@ -170,9 +170,9 @@ func TestTitleFromPath(t *testing.T) {
 		title string
 		year  int
 	}{
-		"/library/Shows/Demo Show (2024) [tvdb-999]/Season 01/x.strm":     {"Demo Show", 2024},
-		"/library/Shows/No Year [tvdb-1]/Season 01/x.strm":                {"No Year", 0},
-		"/library/Shows/Parens (In) Title (2001) [tvdb-2]/Season 01/x.st": {"Parens (In) Title", 2001},
+		"/library/tv/Demo Show (2024) [tvdb-999]/Season 01/x.strm":     {"Demo Show", 2024},
+		"/library/tv/No Year [tvdb-1]/Season 01/x.strm":                {"No Year", 0},
+		"/library/tv/Parens (In) Title (2001) [tvdb-2]/Season 01/x.st": {"Parens (In) Title", 2001},
 	}
 	for path, want := range cases {
 		title, year := titleFromPath(path)
@@ -216,11 +216,11 @@ func TestRebuildSkipsJunkWithoutFailing(t *testing.T) {
 	_, lib, root := newMonitor(t, nil)
 	seedShow(t, root, lib, [2]int{1, 1})
 
-	junk := filepath.Join(root, "Shows", "broken.strm")
+	junk := filepath.Join(root, rootShows, "broken.strm")
 	if err := os.WriteFile(junk, []byte("not a url at all\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(root, "Shows", "notes.txt"), []byte("hello"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(root, rootShows, "notes.txt"), []byte("hello"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -267,5 +267,53 @@ func TestRebuiltIndexIsMonitorable(t *testing.T) {
 		if p.Season == 1 && p.Episode == 2 && !strings.Contains(p.Path, "S01E02") {
 			t.Errorf("unexpected path for the filled episode: %s", p.Path)
 		}
+	}
+}
+
+// A show's category is decided when its first placeholder is written and then
+// read back off disk, never re-derived. If the monitor re-classified, a
+// metadata correction could start filing new episodes into a different root
+// than the ones already in the library — which a media server sees as the show
+// vanishing and a new one appearing, taking watch state with it.
+func TestMonitorKeepsNewEpisodesInTheRootTheShowAlreadyLivesIn(t *testing.T) {
+	root := t.TempDir()
+	w := NewWriter(root, "http://127.0.0.1:8080/api/v1/plugins/1", nil)
+
+	// An anime show with one episode already on disk.
+	first, err := w.Write(Item{
+		MediaType: "series", Title: "Frieren", Year: 2023,
+		ID: MediaID{SourceTVDB, "424536"}, IMDbID: "tt22248376",
+		Season: 1, Episode: 1, Quality: "1080p", Anime: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(filepath.ToSlash(first), rootAnimeShows) {
+		t.Fatalf("setup wrote outside the anime root: %s", first)
+	}
+
+	// Rebuild from disk, exactly as a restart would.
+	lib := NewLibrary()
+	if _, _, err := lib.Rebuild(root); err != nil {
+		t.Fatal(err)
+	}
+
+	m := NewMonitor(lib, w, &stubEpisodes{eps: []EpisodeRef{
+		{Season: 1, Episode: 1},
+		{Season: 1, Episode: 2}, // newly aired
+	}}, nil)
+	if _, err := m.Run(context.Background(), nil); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	want := filepath.Join(root, filepath.FromSlash(rootAnimeShows),
+		"Frieren (2023) [tvdb-424536]", "Season 01", "Frieren (2023) S01E02 [1080p].strm")
+	if _, err := os.Stat(want); err != nil {
+		t.Errorf("new episode not written beside the existing ones: %v", err)
+	}
+	// And emphatically not in the general root.
+	stray := filepath.Join(root, rootShows, "Frieren (2023) [tvdb-424536]")
+	if _, err := os.Stat(stray); err == nil {
+		t.Error("the show was split across two roots")
 	}
 }

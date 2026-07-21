@@ -53,6 +53,16 @@ type Item struct {
 	Season  int
 	Episode int
 	Quality string
+
+	// Anime routes the item to the anime roots instead of the general ones.
+	//
+	// Decided once, by whoever builds the Item, and then fixed: the path a
+	// placeholder was written to IS where it lives, and Rebuild reads categories
+	// back off disk rather than re-deriving them. So a later metadata correction
+	// can never relocate an item that is already in someone's library — which
+	// would look to a media server like the title vanished and a new one
+	// appeared, losing watch state with it.
+	Anime bool
 }
 
 // Write creates the placeholder and returns its path.
@@ -144,6 +154,68 @@ func (w *Writer) target(item Item) string {
 	return target
 }
 
+// Library roots. Anime is separated so an operator can point a differently
+// configured Silo library at it: anime seasons and absolute numbering are a
+// long-standing source of mismatches, and the scanner settings that fix them
+// are wrong for everything else.
+const (
+	rootMovies      = "movies"
+	rootShows       = "tv"
+	rootAnimeMovies = "anime/movies"
+	rootAnimeShows  = "anime/shows"
+)
+
+// LibraryRoots lists every root Wisp writes into, in a stable order.
+func LibraryRoots() []string {
+	return []string{rootMovies, rootShows, rootAnimeMovies, rootAnimeShows}
+}
+
+// EnsureRoots creates the library roots if they are missing, and reports which
+// ones it had to create.
+//
+// Called at configuration rather than left to the first write, because an
+// operator has to point a Silo library at each of these before any placeholder
+// exists — and Silo cannot be pointed at a directory that is not there yet.
+// Creating them up front turns "request something, then discover the library
+// was never wired up" into "the folders are waiting when you go to add them".
+//
+// Missing roots are the normal case on a fresh install, so creating them is not
+// noteworthy; failing to is, and that error is returned rather than logged and
+// dropped — an unwritable library means every later request fails.
+func (w *Writer) EnsureRoots() (created []string, err error) {
+	if w.root == "" {
+		return nil, fmt.Errorf("placeholder: library path is not configured")
+	}
+	for _, rel := range LibraryRoots() {
+		full := filepath.Join(w.root, filepath.FromSlash(rel))
+		switch _, statErr := os.Stat(full); {
+		case statErr == nil:
+			continue // already there
+		case !os.IsNotExist(statErr):
+			return created, fmt.Errorf("placeholder: check %s: %w", rel, statErr)
+		}
+		if mkErr := os.MkdirAll(full, 0o755); mkErr != nil {
+			return created, fmt.Errorf("placeholder: create %s: %w", rel, mkErr)
+		}
+		created = append(created, rel)
+	}
+	return created, nil
+}
+
+// rootFor returns the library root an item belongs under.
+func rootFor(mediaType string, anime bool) string {
+	if mediaType == "movie" {
+		if anime {
+			return rootAnimeMovies
+		}
+		return rootMovies
+	}
+	if anime {
+		return rootAnimeShows
+	}
+	return rootShows
+}
+
 // relPath builds a library-conventional path for an item.
 //
 // The layout deliberately mirrors what Plex, Jellyfin, Emby and Silo all
@@ -172,7 +244,7 @@ func (w *Writer) relPath(item Item) (string, error) {
 			name = fmt.Sprintf("%s (%d)", title, item.Year)
 		}
 		folder := name + " " + item.ID.FolderTag()
-		return filepath.Join("Movies", folder, name+quality+".strm"), nil
+		return filepath.Join(rootFor(item.MediaType, item.Anime), folder, name+quality+".strm"), nil
 
 	case "series":
 		if item.Season < 0 || item.Episode < 1 {
@@ -184,7 +256,7 @@ func (w *Writer) relPath(item Item) (string, error) {
 		}
 		folder := show + " " + item.ID.FolderTag()
 		episode := fmt.Sprintf("%s S%02dE%02d%s.strm", show, item.Season, item.Episode, quality)
-		return filepath.Join("Shows", folder, fmt.Sprintf("Season %02d", item.Season), episode), nil
+		return filepath.Join(rootFor(item.MediaType, item.Anime), folder, fmt.Sprintf("Season %02d", item.Season), episode), nil
 
 	default:
 		return "", fmt.Errorf("placeholder: unknown media type %q", item.MediaType)

@@ -15,6 +15,7 @@ type Placeholder struct {
 	Season         int        `json:"season,omitempty"`
 	Episode        int        `json:"episode,omitempty"`
 	Quality        string     `json:"quality,omitempty"`
+	Anime          bool       `json:"anime,omitempty"`
 	CreatedAt      time.Time  `json:"created_at"`
 	LastResolvedAt *time.Time `json:"last_resolved_at"`
 	LastError      string     `json:"last_error,omitempty"`

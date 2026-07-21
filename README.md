@@ -48,7 +48,7 @@ Then fill in:
 |---|---|
 | AIOStreams URL | The full manifest URL from its configure page |
 | AIOStreams Password | Its password, if it has one |
-| Library Path | Where Wisp writes placeholders, e.g. `/library` |
+| Library Path | Where Wisp writes placeholders, e.g. `/library`. Must be writable by Silo. Wisp creates `movies/`, `tv/`, `anime/movies/` and `anime/shows/` under it. |
 
 Finally, create a Silo library pointed at that same path.
 
@@ -74,8 +74,8 @@ Movies are identified by TMDB and series by TVDB, in both the resolver path and
 the folder name:
 
 ```
-Movies/The Matrix (1999) [tmdb-603]/The Matrix (1999) [2160p].strm
-Shows/Game of Thrones (2011) [tvdb-121361]/Season 01/... S01E09 [1080p].strm
+movies/The Matrix (1999) [tmdb-603]/The Matrix (1999) [2160p].strm
+tv/Game of Thrones (2011) [tvdb-121361]/Season 01/... S01E09 [1080p].strm
 ```
 
 TVDB is the authority media servers agree on for season and episode numbering.
@@ -86,6 +86,31 @@ TVDB entry.
 AIOStreams accepts IMDb ids and nothing else, so the lookup key travels inside
 the signed placeholder URL. Resolving it at play time would put two metadata
 calls in front of every playback.
+
+### Library roots
+
+Wisp writes into four roots, created under the configured library path when the
+plugin is configured — before anything is requested, so there is something to
+point a Silo library at:
+
+```
+movies/          anime/movies/
+tv/              anime/shows/
+```
+
+Anime is separated because its season and absolute numbering needs scanner
+settings that are wrong for everything else. Classification is deliberately
+conservative: it requires the Animation genre **and** a Japanese language or
+country signal, so Western animation stays in the general roots. An anime that
+is missed still plays perfectly — it just sits alongside everything else.
+
+The category is decided once, when the first placeholder is written, and is then
+read back off the path rather than re-derived. A later metadata correction
+therefore cannot relocate a title already in someone's library, which a media
+server would see as the show vanishing and a new one appearing — taking watch
+state with it.
+
+Add one Silo library per root you intend to use.
 
 ### Security
 

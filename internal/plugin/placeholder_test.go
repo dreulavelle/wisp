@@ -25,7 +25,7 @@ func TestWriteMoviePlaceholder(t *testing.T) {
 		t.Fatalf("Write() error = %v", err)
 	}
 
-	want := filepath.Join(root, "Movies", "The Matrix (1999) [tmdb-603]", "The Matrix (1999) [2160p].strm")
+	want := filepath.Join(root, rootMovies, "The Matrix (1999) [tmdb-603]", "The Matrix (1999) [2160p].strm")
 	if path != want {
 		t.Errorf("path = %q, want %q", path, want)
 	}
@@ -57,7 +57,7 @@ func TestWriteEpisodePlaceholder(t *testing.T) {
 		t.Fatalf("Write() error = %v", err)
 	}
 
-	want := filepath.Join(root, "Shows", "Game of Thrones (2011) [tvdb-121361]", "Season 01",
+	want := filepath.Join(root, rootShows, "Game of Thrones (2011) [tvdb-121361]", "Season 01",
 		"Game of Thrones (2011) S01E09 [1080p].strm")
 	if path != want {
 		t.Errorf("path = %q\nwant %q", path, want)
@@ -255,7 +255,7 @@ func TestWriteMovieWithoutYear(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Write() error = %v", err)
 	}
-	want := filepath.Join(root, "Movies", "Untitled [tmdb-42]", "Untitled.strm")
+	want := filepath.Join(root, rootMovies, "Untitled [tmdb-42]", "Untitled.strm")
 	if path != want {
 		t.Errorf("path = %q, want %q", path, want)
 	}
@@ -276,4 +276,87 @@ func parseResolverURL(t *testing.T, raw string) (*url.URL, ResolveRequest) {
 	req.Quality = u.Query().Get("quality")
 	req.IMDbID = u.Query().Get("imdb")
 	return u, req
+}
+
+// Anime lands in its own roots so an operator can point a differently
+// configured Silo library at it — anime numbering needs scanner settings that
+// are wrong for everything else.
+func TestWriteRoutesAnimeToItsOwnRoots(t *testing.T) {
+	root := t.TempDir()
+	w := NewWriter(root, "http://127.0.0.1:8080/api/v1/plugins/1", nil)
+
+	movie, err := w.Write(Item{
+		MediaType: "movie", Title: "Spirited Away", Year: 2001,
+		ID: MediaID{SourceTMDB, "129"}, IMDbID: "tt0245429", Anime: true,
+	})
+	if err != nil {
+		t.Fatalf("Write(anime movie) error = %v", err)
+	}
+	if want := filepath.Join(root, rootAnimeMovies); !strings.HasPrefix(movie, want) {
+		t.Errorf("anime movie at %q, want it under %q", movie, want)
+	}
+
+	episode, err := w.Write(Item{
+		MediaType: "series", Title: "Frieren", Year: 2023,
+		ID: MediaID{SourceTVDB, "424536"}, IMDbID: "tt22248376",
+		Season: 1, Episode: 1, Anime: true,
+	})
+	if err != nil {
+		t.Fatalf("Write(anime episode) error = %v", err)
+	}
+	if want := filepath.Join(root, rootAnimeShows); !strings.HasPrefix(episode, want) {
+		t.Errorf("anime episode at %q, want it under %q", episode, want)
+	}
+}
+
+// The roots have to exist before an operator can point Silo libraries at them,
+// which happens before anything is ever requested.
+func TestEnsureRootsCreatesEveryLibraryRoot(t *testing.T) {
+	root := t.TempDir()
+	w := NewWriter(root, "http://127.0.0.1:8080/api/v1/plugins/1", nil)
+
+	created, err := w.EnsureRoots()
+	if err != nil {
+		t.Fatalf("EnsureRoots() error = %v", err)
+	}
+	if len(created) != len(LibraryRoots()) {
+		t.Errorf("created %d root(s), want %d: %v", len(created), len(LibraryRoots()), created)
+	}
+	for _, rel := range LibraryRoots() {
+		info, statErr := os.Stat(filepath.Join(root, filepath.FromSlash(rel)))
+		if statErr != nil {
+			t.Errorf("root %s was not created: %v", rel, statErr)
+			continue
+		}
+		if !info.IsDir() {
+			t.Errorf("root %s is not a directory", rel)
+		}
+	}
+}
+
+// Re-running must be silent and must not disturb what is already there — it is
+// called on every Configure, and an operator editing settings should not see
+// churn.
+func TestEnsureRootsIsIdempotentAndPreservesContent(t *testing.T) {
+	root := t.TempDir()
+	w := NewWriter(root, "http://127.0.0.1:8080/api/v1/plugins/1", nil)
+
+	if _, err := w.EnsureRoots(); err != nil {
+		t.Fatalf("first EnsureRoots() error = %v", err)
+	}
+	marker := filepath.Join(root, rootMovies, "existing.strm")
+	if err := os.WriteFile(marker, []byte("keep me"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	created, err := w.EnsureRoots()
+	if err != nil {
+		t.Fatalf("second EnsureRoots() error = %v", err)
+	}
+	if len(created) != 0 {
+		t.Errorf("second run reported creating %v; the roots already existed", created)
+	}
+	if body, readErr := os.ReadFile(marker); readErr != nil || string(body) != "keep me" {
+		t.Errorf("existing content disturbed: %q, %v", body, readErr)
+	}
 }
