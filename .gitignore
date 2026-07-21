@@ -21,6 +21,7 @@ dist/
 *.key
 *.out
 *.pem
+repository.e2e.json
 *_rsa
 # ── Runtime data (pin + monitor database) ───────────────────────────────────
 secrets.*

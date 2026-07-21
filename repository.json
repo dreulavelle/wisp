@@ -113,15 +113,15 @@
           "license_spdx": "MIT"
         }
       },
-      "repo_url": "https://github.com/e2e/wisp",
+      "repo_url": "https://github.com/dreulavelle/wisp",
       "binaries": {
         "linux/amd64": {
-          "url": "http://127.0.0.1:18111/binaries/silo-plugin-wisp-linux-amd64",
-          "checksum": "3c9a7c66f5f44768768582096884f75934ab4933dfedb8c3f9a52e9565b334c2"
+          "url": "https://github.com/dreulavelle/wisp/releases/download/v2.0.0/silo-plugin-wisp-linux-amd64",
+          "checksum": "bc4223a268d0f585beaa783ef89510fe6ab484a98d36537dceae03309a8ff8a7"
         },
         "linux/arm64": {
-          "url": "http://127.0.0.1:18111/binaries/silo-plugin-wisp-linux-arm64",
-          "checksum": "90ba45f0eb963ab822c43b11ca3e1277273f7e43c3e34a954290ff75f578c40b"
+          "url": "https://github.com/dreulavelle/wisp/releases/download/v2.0.0/silo-plugin-wisp-linux-arm64",
+          "checksum": "2d25385dafda4c1e77a605befe463f4a9b2bd6e5e3a2c122216234b4b5d80879"
         }
       }
     }

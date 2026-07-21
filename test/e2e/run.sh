@@ -54,7 +54,7 @@ FAILURES=0
 
 cleanup() {
   step "Tearing down"
-  rm -f "$HERE/stub-bin" "$HERE/fixture-bin"
+  rm -f "$HERE/stub-bin" "$HERE/fixture-bin" "$HERE/repository.e2e.json"
   docker compose -p "$PROJECT" down -v --remove-orphans >/dev/null 2>&1 || true
   rm -rf "$HERE/library"
 }
@@ -94,8 +94,9 @@ step "Starting AIOStreams stub on container loopback :${STUB_PORT}"
 docker cp "$HERE/stub-bin" "$CID:/tmp/stub" >/dev/null
 if [[ "$MODE" == "catalog" ]]; then
   # Point the feed at the stub so Silo downloads binaries from it.
-  GITHUB_REPOSITORY=e2e/wisp python3 "$REPO/scripts/gen-repository.py" v0.0.0-e2e >/dev/null
-  python3 - "$REPO/repository.json" "http://127.0.0.1:${STUB_PORT}/binaries" <<'PY'
+  E2E_FEED="$HERE/repository.e2e.json"
+  GITHUB_REPOSITORY=e2e/wisp python3 "$REPO/scripts/gen-repository.py" v0.0.0-e2e "$E2E_FEED" >/dev/null
+  python3 - "$E2E_FEED" "http://127.0.0.1:${STUB_PORT}/binaries" <<'PY'
 import json, sys
 path, base = sys.argv[1], sys.argv[2]
 d = json.load(open(path))
@@ -103,7 +104,7 @@ for name, binary in d["plugins"][0]["binaries"].items():
     binary["url"] = base + "/" + binary["url"].rsplit("/", 1)[1]
 json.dump(d, open(path, "w"), indent=2)
 PY
-  docker cp "$REPO/repository.json" "$CID:/tmp/repository.json" >/dev/null
+  docker cp "$E2E_FEED" "$CID:/tmp/repository.json" >/dev/null
   docker cp "$REPO/dist" "$CID:/tmp/dist" >/dev/null
   docker exec -d -e WISP_E2E_REPOSITORY=/tmp/repository.json -e WISP_E2E_DIST=/tmp/dist \
     "$CID" /tmp/stub -addr "127.0.0.1:${STUB_PORT}" -target "$RESOLVED_TARGET"

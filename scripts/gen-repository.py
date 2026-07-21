@@ -76,6 +76,10 @@ def main():
     repo = os.environ.get("GITHUB_REPOSITORY", "dreulavelle/wisp")
     manifest = json.load(open(os.path.join(ROOT, "cmd", PLUGIN, "manifest.json")))
     tag = sys.argv[1] if len(sys.argv) > 1 else f"v{manifest['version']}"
+    # Tests generate a throwaway feed pointing at a local stub. Writing that to
+    # the tracked file would publish test URLs to real operators — which is
+    # exactly what happened once.
+    out = sys.argv[2] if len(sys.argv) > 2 else os.path.join(ROOT, "repository.json")
     base = f"https://github.com/{repo}/releases/download/{tag}"
 
     # Browsing metadata only. Install reads the manifest from the binary, so a
@@ -103,11 +107,11 @@ def main():
         ]
     }
 
-    with open(os.path.join(ROOT, "repository.json"), "w") as fh:
+    with open(out, "w") as fh:
         json.dump(index, fh, indent=2)
         fh.write("\n")
 
-    print(f"repository.json → {tag}")
+    print(f"{out} → {tag}")
     for platform, binary in binaries.items():
         print(f"  {platform:14} {binary['checksum'][:16]}...")
 
