@@ -41,7 +41,10 @@ AIO_URL="http://127.0.0.1:${STUB_PORT}/stremio/e2e/manifest.json"
 AIO_PASS="e2e-password"
 
 MODE="plugin"
-[[ "${1:-}" == "--stub" ]] && MODE="stub"
+case "${1:-}" in
+  --stub) MODE="stub" ;;
+  --catalog) MODE="catalog" ;;
+esac
 
 pass() { printf '\033[32m  PASS\033[0m %s\n' "$1"; }
 fail() { printf '\033[31m  FAIL\033[0m %s\n' "$1"; FAILURES=$((FAILURES + 1)); }
@@ -68,9 +71,10 @@ step "Building test binaries (mode: $MODE)"
 (cd "$REPO" && CGO_ENABLED=0 go build -o "$HERE/fixture-bin" ./test/e2e/fixture) \
   && pass "fixture built" || { fail "fixture build failed"; exit 1; }
 
-if [[ "$MODE" == "plugin" ]]; then
-  (cd "$REPO" && make zip >/dev/null 2>&1) \
-    && pass "plugin packaged" || { fail "plugin packaging failed"; exit 1; }
+if [[ "$MODE" == "plugin" || "$MODE" == "catalog" ]]; then
+  # Catalog installs download per-arch binaries, so dist/ is needed either way.
+  (cd "$REPO" && make dist zip >/dev/null 2>&1) \
+    && pass "plugin built and packaged" || { fail "plugin packaging failed"; exit 1; }
 fi
 
 # ---------------------------------------------------------------------------
@@ -88,7 +92,24 @@ CID="$(docker compose -p "$PROJECT" ps -q silo)"
 # ---------------------------------------------------------------------------
 step "Starting AIOStreams stub on container loopback :${STUB_PORT}"
 docker cp "$HERE/stub-bin" "$CID:/tmp/stub" >/dev/null
-docker exec -d "$CID" /tmp/stub -addr "127.0.0.1:${STUB_PORT}" -target "$RESOLVED_TARGET"
+if [[ "$MODE" == "catalog" ]]; then
+  # Point the feed at the stub so Silo downloads binaries from it.
+  GITHUB_REPOSITORY=e2e/wisp python3 "$REPO/scripts/gen-repository.py" v0.0.0-e2e >/dev/null
+  python3 - "$REPO/repository.json" "http://127.0.0.1:${STUB_PORT}/binaries" <<'PY'
+import json, sys
+path, base = sys.argv[1], sys.argv[2]
+d = json.load(open(path))
+for name, binary in d["plugins"][0]["binaries"].items():
+    binary["url"] = base + "/" + binary["url"].rsplit("/", 1)[1]
+json.dump(d, open(path, "w"), indent=2)
+PY
+  docker cp "$REPO/repository.json" "$CID:/tmp/repository.json" >/dev/null
+  docker cp "$REPO/dist" "$CID:/tmp/dist" >/dev/null
+  docker exec -d -e WISP_E2E_REPOSITORY=/tmp/repository.json -e WISP_E2E_DIST=/tmp/dist \
+    "$CID" /tmp/stub -addr "127.0.0.1:${STUB_PORT}" -target "$RESOLVED_TARGET"
+else
+  docker exec -d "$CID" /tmp/stub -addr "127.0.0.1:${STUB_PORT}" -target "$RESOLVED_TARGET"
+fi
 # The image ships curl but not wget, so probe with curl.
 stub_ready() { docker exec "$CID" curl -sf -o /dev/null --max-time 2 "http://127.0.0.1:${STUB_PORT}/healthz" 2>/dev/null; }
 for _ in $(seq 1 20); do stub_ready && break; sleep 1; done
@@ -111,7 +132,38 @@ AUTH=(-H "Authorization: Bearer $TOKEN")
 # ---------------------------------------------------------------------------
 RESOLVER_BASE="http://127.0.0.1:${STUB_PORT}/api/v1/plugins/1"
 
-if [[ "$MODE" == "plugin" ]]; then
+if [[ "$MODE" == "catalog" ]]; then
+  step "Installing the Wisp plugin from a catalog feed"
+  REPO_ID="$(curl -s -X POST "$BASE/api/v1/admin/plugins/repositories" "${AUTH[@]}" \
+    -H 'Content-Type: application/json' \
+    -d "{\"display_name\":\"E2E\",\"url\":\"http://127.0.0.1:${STUB_PORT}/repository.json\"}" 2>/dev/null \
+    | python3 -c 'import json,sys
+try:
+    d=json.load(sys.stdin); d=d.get("data",d); print(d.get("id",""))
+except Exception: print("")' 2>/dev/null)"
+  [[ -n "$REPO_ID" ]] && pass "repository added (id=$REPO_ID)" || fail "could not add the repository"
+
+  CATALOG="$(curl -s "$BASE/api/v1/admin/plugins/catalog" "${AUTH[@]}" 2>/dev/null || true)"
+  if printf '%s' "$CATALOG" | grep -q '"wisp"'; then
+    pass "wisp appears in the catalog"
+  else
+    fail "wisp is not in the catalog: $(printf '%s' "$CATALOG" | head -c 200)"
+  fi
+
+  INSTALL="$(curl -s -X POST "$BASE/api/v1/admin/plugins/installations" "${AUTH[@]}" \
+    -H 'Content-Type: application/json' \
+    -d "{\"repository_id\":$REPO_ID,\"plugin_id\":\"wisp\",\"version\":\"2.0.0\"}" 2>/dev/null || true)"
+  INSTALL_ID="$(printf '%s' "$INSTALL" | python3 -c 'import json,sys
+try:
+    d=json.load(sys.stdin); d=d.get("data",d); print(d.get("id",""))
+except Exception: print("")' 2>/dev/null)"
+  if [[ -n "$INSTALL_ID" ]]; then
+    pass "installed from the catalog (installation id=$INSTALL_ID)"
+  else
+    fail "catalog install failed: $(printf '%s' "$INSTALL" | head -c 300)"
+  fi
+
+elif [[ "$MODE" == "plugin" ]]; then
   step "Installing the Wisp plugin"
   UPLOAD="$(curl -s -X POST "$BASE/api/v1/admin/plugins/uploads" "${AUTH[@]}" \
     -F "archive=@$REPO/dist/silo-plugin-wisp.zip" 2>/dev/null || true)"
@@ -158,6 +210,25 @@ except Exception: print("")' 2>/dev/null)"
     fi
     RESOLVER_BASE="http://127.0.0.1:8080/api/v1/plugins/$INSTALL_ID"
   fi
+fi
+
+if [[ "$MODE" == "catalog" && -n "${INSTALL_ID:-}" ]]; then
+  CFG_CODE="$(curl -s -o /tmp/wisp-e2e-config.json -w '%{http_code}' \
+    -X PUT "$BASE/api/v1/admin/plugins/installations/$INSTALL_ID/config" "${AUTH[@]}" \
+    -H 'Content-Type: application/json' \
+    -d "{\"key\":\"global\",\"value\":{\"aiostreams_url\":\"$AIO_URL\",\"aiostreams_password\":\"$AIO_PASS\",\"library_path\":\"/library\"}}" 2>/dev/null || true)"
+  [[ "$CFG_CODE" == "200" || "$CFG_CODE" == "204" ]] && pass "plugin configured" \
+    || fail "plugin config returned $CFG_CODE"
+
+  for _ in $(seq 1 15); do
+    [[ "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/v1/plugins/$INSTALL_ID/healthz")" == "200" ]] && break
+    sleep 1
+  done
+  HEALTH="$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/v1/plugins/$INSTALL_ID/healthz" || true)"
+  [[ "$HEALTH" == "200" ]] && pass "catalog-installed plugin is serving" \
+    || fail "catalog-installed plugin health returned $HEALTH"
+
+  RESOLVER_BASE="http://127.0.0.1:8080/api/v1/plugins/$INSTALL_ID"
 fi
 
 # ---------------------------------------------------------------------------

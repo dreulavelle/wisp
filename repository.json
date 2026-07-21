@@ -1,0 +1,129 @@
+{
+  "plugins": [
+    {
+      "manifest": {
+        "plugin_id": "wisp",
+        "version": "2.0.0",
+        "silo_api_version": "v1",
+        "category": "Video/Wisp",
+        "supported_platforms": [
+          {
+            "os": "linux",
+            "arch": "amd64"
+          },
+          {
+            "os": "linux",
+            "arch": "arm64"
+          }
+        ],
+        "capabilities": [
+          {
+            "type": "http_routes.v1",
+            "id": "wisp",
+            "display_name": "Wisp",
+            "description": "Resolves .strm placeholders to live streams at playback time, and serves Wisp's management UI."
+          },
+          {
+            "type": "scan_source.v1",
+            "id": "wisp-placeholders",
+            "display_name": "Wisp placeholders",
+            "description": "Reports newly written .strm placeholders to Silo's autoscan, so requested items appear without a full library scan."
+          },
+          {
+            "type": "request_router.v1",
+            "id": "wisp-requests",
+            "display_name": "Wisp",
+            "description": "Turns a Silo request into a playable placeholder immediately, resolved on demand at playback."
+          },
+          {
+            "type": "scheduled_task.v1",
+            "id": "fill-episodes",
+            "display_name": "Fill new episodes",
+            "description": "Writes placeholders for episodes that have aired since the last pass. Runs at startup by default; set a schedule under the plugin's task settings to have it run periodically."
+          }
+        ],
+        "global_config_schema": [
+          {
+            "key": "global",
+            "json_schema": "{\"type\":\"object\",\"properties\":{\"aiostreams_url\":{\"type\":\"string\",\"title\":\"AIOStreams URL\"},\"aiostreams_password\":{\"type\":\"string\",\"title\":\"AIOStreams Password\"},\"library_path\":{\"type\":\"string\",\"title\":\"Library Path\"}},\"required\":[\"aiostreams_url\",\"library_path\"]}",
+            "admin_form": {
+              "submit_label": "Save Wisp settings",
+              "fields": [
+                {
+                  "key": "aiostreams_url",
+                  "label": "AIOStreams URL",
+                  "control": 1,
+                  "required": true,
+                  "description": "Full AIOStreams manifest URL, copied from its configure page. Example: https://aiostreams.example.com/stremio/<uuid>/manifest.json",
+                  "placeholder": "https://aiostreams.example.com/stremio/<uuid>/manifest.json"
+                },
+                {
+                  "key": "aiostreams_password",
+                  "label": "AIOStreams Password",
+                  "control": 3,
+                  "secret": true,
+                  "description": "Password for the AIOStreams instance. Leave empty if it needs none."
+                },
+                {
+                  "key": "library_path",
+                  "label": "Library Path",
+                  "control": 1,
+                  "required": true,
+                  "description": "Directory where Wisp writes .strm placeholders. Silo must have a library pointed at this same path.",
+                  "placeholder": "/library"
+                }
+              ]
+            }
+          }
+        ],
+        "http_routes": [
+          {
+            "id": "resolve",
+            "method": "GET",
+            "path": "/resolve/*",
+            "access": "public"
+          },
+          {
+            "id": "healthz",
+            "method": "GET",
+            "path": "/healthz",
+            "access": "public"
+          },
+          {
+            "id": "admin",
+            "method": "*",
+            "path": "/admin/*",
+            "access": "admin",
+            "navigable": true,
+            "navigation_kind": "admin",
+            "navigation_label": "Wisp"
+          }
+        ],
+        "presentation": {
+          "display_name": "Wisp",
+          "summary": "On-demand playback: requests become instant library placeholders, resolved to a real stream the moment someone presses play.",
+          "description_markdown": "Wisp turns a request into a playable library item immediately. It writes a small `.strm` placeholder into your library, Silo picks it up on the next scan, and the actual stream is resolved through AIOStreams only when playback begins.\n\nBecause nothing durable ever stores a stream URL, expiring debrid links stop being a problem: every play resolves fresh. There is no mount, no FUSE, and no privileged container \u2014 a placeholder is an ordinary text file.\n\nRequires a Silo build with `.strm` support.",
+          "setup_markdown": "1. Install the plugin.\n2. Set the AIOStreams URL and password, and the library path Wisp should write placeholders into.\n3. Create a Silo library pointed at that same path.\n4. Request something, then run a scan.",
+          "homepage_url": "https://github.com/dreulavelle/wisp",
+          "source_url": "https://github.com/dreulavelle/wisp",
+          "support_url": "https://github.com/dreulavelle/wisp/issues",
+          "changelog_url": "https://github.com/dreulavelle/wisp/releases",
+          "publisher_name": "dreulavelle",
+          "publisher_url": "https://github.com/dreulavelle",
+          "license_spdx": "MIT"
+        }
+      },
+      "repo_url": "https://github.com/e2e/wisp",
+      "binaries": {
+        "linux/amd64": {
+          "url": "http://127.0.0.1:18111/binaries/silo-plugin-wisp-linux-amd64",
+          "checksum": "3c9a7c66f5f44768768582096884f75934ab4933dfedb8c3f9a52e9565b334c2"
+        },
+        "linux/arm64": {
+          "url": "http://127.0.0.1:18111/binaries/silo-plugin-wisp-linux-arm64",
+          "checksum": "90ba45f0eb963ab822c43b11ca3e1277273f7e43c3e34a954290ff75f578c40b"
+        }
+      }
+    }
+  ]
+}

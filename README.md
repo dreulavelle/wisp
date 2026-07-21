@@ -21,12 +21,28 @@ as a subprocess inside Silo, and a placeholder is an ordinary text file.
 
 ## Install
 
+Add this under **Administration → Plugins → Repositories**:
+
+```
+https://raw.githubusercontent.com/dreulavelle/wisp/main/repository.json
+```
+
+Then install **Wisp** from the plugin catalog. Silo picks up later versions from
+the same feed, so upgrading is a click rather than a rebuild — the release
+workflow refreshes that URL on every tag.
+
+<details>
+<summary>Manual install instead</summary>
+
 ```sh
 make zip
 ```
 
-Then in Silo: **Administration → Plugins → Manual Install**, upload
-`dist/silo-plugin-wisp.zip`, and fill in:
+**Administration → Plugins → Manual Install**, upload
+`dist/silo-plugin-wisp.zip`.
+</details>
+
+Then fill in:
 
 | Setting | Value |
 |---|---|

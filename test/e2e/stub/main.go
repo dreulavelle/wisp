@@ -21,6 +21,8 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
+	"strings"
 )
 
 // searchResult mirrors the shape AIOStreams returns from /api/v1/search.
@@ -72,6 +74,33 @@ func main() {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(payload)
+	})
+
+	// Serves the catalog feed and the binaries it points at, so the test can
+	// prove a catalog install works rather than trusting a reading of Silo's
+	// resolution code. Silo picks binaries[<os>/<arch>], verifies the download
+	// against that checksum, then reads the real manifest from the binary.
+	mux.HandleFunc("/repository.json", func(w http.ResponseWriter, _ *http.Request) {
+		body, err := os.ReadFile(os.Getenv("WISP_E2E_REPOSITORY"))
+		if err != nil {
+			http.Error(w, "no catalog feed", http.StatusNotFound)
+			return
+		}
+		log.Printf("served catalog feed")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(body)
+	})
+
+	mux.HandleFunc("/binaries/", func(w http.ResponseWriter, r *http.Request) {
+		name := strings.TrimPrefix(r.URL.Path, "/binaries/")
+		body, err := os.ReadFile(filepath.Join(os.Getenv("WISP_E2E_DIST"), name))
+		if err != nil {
+			http.Error(w, "no such binary", http.StatusNotFound)
+			return
+		}
+		log.Printf("served binary %s (%d bytes)", name, len(body))
+		w.Header().Set("Content-Type", "application/octet-stream")
+		_, _ = w.Write(body)
 	})
 
 	// Bare resolver for the no-plugin variant of the test.
