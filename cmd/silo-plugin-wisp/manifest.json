@@ -42,7 +42,7 @@
   "globalConfigSchema": [
     {
       "key": "global",
-      "jsonSchema": "{\"type\":\"object\",\"properties\":{\"aiostreams_url\":{\"type\":\"string\",\"title\":\"AIOStreams URL\"},\"library_path\":{\"type\":\"string\",\"title\":\"Library Path\"}},\"required\":[\"aiostreams_url\",\"library_path\"]}",
+      "jsonSchema": "{\"type\":\"object\",\"properties\":{\"aiostreams_url\":{\"type\":\"string\",\"title\":\"AIOStreams URL\"},\"library_path\":{\"type\":\"string\",\"title\":\"Library Path\"},\"tmdb_api_key\":{\"type\":\"string\",\"title\":\"TMDB API Token\"},\"tmdb_region\":{\"type\":\"string\",\"title\":\"TMDB Region(s)\",\"default\":\"US\"},\"movie_release_lead_days\":{\"type\":\"number\",\"minimum\":0,\"maximum\":365,\"default\":0},\"availability_gate\":{\"type\":\"boolean\",\"title\":\"Availability Gate\",\"default\":false}},\"required\":[\"aiostreams_url\",\"library_path\"]}",
       "adminForm": {
         "submitLabel": "Save Wisp settings",
         "fields": [
@@ -61,6 +61,32 @@
             "required": true,
             "description": "Directory where Wisp writes .strm placeholders. Must be writable by Silo. Wisp creates movies/, tv/, anime/movies/ and anime/shows/ under it — add a Silo library for each root you want to use.",
             "placeholder": "/library"
+          },
+          {
+            "key": "tmdb_api_key",
+            "label": "TMDB API Token",
+            "control": "ADMIN_FORM_CONTROL_TEXT",
+            "description": "TMDB v4 bearer token or legacy v3 API key. When set, Wisp checks for a Digital (type 4) or Physical (type 5) release before creating a movie placeholder. Movies still in theaters are queued and retried automatically.",
+            "placeholder": "eyJhbGci..."
+          },
+          {
+            "key": "tmdb_region",
+            "label": "TMDB Region(s)",
+            "control": "ADMIN_FORM_CONTROL_TEXT",
+            "description": "Comma-separated ISO-3166-1 region codes. The gate passes if any region has a home-media release. Example: US,GB,CA,AU",
+            "placeholder": "US,GB"
+          },
+          {
+            "key": "movie_release_lead_days",
+            "label": "Release Lead Days",
+            "control": "ADMIN_FORM_CONTROL_NUMBER",
+            "description": "Write the placeholder up to N days before the TMDB release date. Default 0 (release day only)."
+          },
+          {
+            "key": "availability_gate",
+            "label": "Availability Gate",
+            "control": "ADMIN_FORM_CONTROL_CHECKBOX",
+            "description": "Also require at least one playable stream from the configured addon before writing a movie placeholder."
           }
         ]
       }

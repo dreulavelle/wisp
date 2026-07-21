@@ -56,10 +56,14 @@ type runtimeServer struct {
 }
 
 type settings struct {
-	aioURL        string
-	aioPassword   string
-	libraryPath   string
-	signingSecret string
+	aioURL               string
+	aioPassword          string
+	libraryPath          string
+	signingSecret        string
+	tmdbAPIKey           string
+	tmdbRegion           string
+	movieReleaseLeadDays int
+	availabilityGate     bool
 }
 
 // signingConfigKey is the plugin-owned config entry holding the resolver
@@ -89,6 +93,21 @@ func (s *runtimeServer) Configure(ctx context.Context, req *pluginv1.ConfigureRe
 		}
 		if v, ok := fields["library_path"]; ok {
 			next.libraryPath = strings.TrimSpace(v.GetStringValue())
+		}
+		if v, ok := fields["tmdb_api_key"]; ok {
+			next.tmdbAPIKey = strings.TrimSpace(v.GetStringValue())
+		}
+		if v, ok := fields["tmdb_region"]; ok {
+			reg := strings.TrimSpace(v.GetStringValue())
+			if reg != "" {
+				next.tmdbRegion = strings.ToUpper(reg)
+			}
+		}
+		if v, ok := fields["movie_release_lead_days"]; ok {
+			next.movieReleaseLeadDays = int(v.GetNumberValue())
+		}
+		if v, ok := fields["availability_gate"]; ok {
+			next.availabilityGate = v.GetBoolValue()
 		}
 	}
 
@@ -177,8 +196,13 @@ func (s *runtimeServer) Configure(ctx context.Context, req *pluginv1.ConfigureRe
 		s.router.SetIntake(plugin.NewIntake(writer, s.library, meta, s.log).
 			WithIdentityResolver(meta).
 			WithAnimeClassifier(meta).
-			WithScanPusher(pusher))
-		s.monitor.Set(plugin.NewMonitor(s.library, writer, meta, s.log).WithScanPusher(pusher))
+			WithScanPusher(pusher).
+			WithTMDB(next.tmdbAPIKey, next.tmdbRegion, next.movieReleaseLeadDays).
+			WithAvailabilityGate(client, next.availabilityGate))
+		s.monitor.Set(plugin.NewMonitor(s.library, writer, meta, s.log).
+			WithScanPusher(pusher).
+			WithTMDB(next.tmdbAPIKey, next.tmdbRegion, next.movieReleaseLeadDays).
+			WithAvailabilityGate(client, next.availabilityGate))
 	} else {
 		s.log.Warn("configure: no library path set; requests cannot create placeholders")
 	}

@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	pluginv1 "github.com/Silo-Server/silo-plugin-sdk/pkg/pluginproto/silo/plugin/v1"
+	"github.com/dreulavelle/wisp/internal/aiostreams"
 )
 
 // TaskFillEpisodes is the scheduled task id declared in the manifest.
@@ -34,6 +35,12 @@ type Monitor struct {
 	episodes EpisodeLister
 	pusher   *ScanPusher
 	log      *slog.Logger
+
+	client               *aiostreams.Client
+	tmdbAPIKey           string
+	tmdbRegion           string
+	movieReleaseLeadDays int
+	availabilityGate     bool
 }
 
 // NewMonitor builds the scheduled-task handler.
@@ -54,6 +61,21 @@ func (m *Monitor) WithScanPusher(p *ScanPusher) *Monitor {
 	if p != nil {
 		m.pusher = p
 	}
+	return m
+}
+
+// WithTMDB configures the TMDB release-date gate (mirrors Intake.WithTMDB).
+func (m *Monitor) WithTMDB(apiKey, region string, leadDays int) *Monitor {
+	m.tmdbAPIKey = apiKey
+	m.tmdbRegion = region
+	m.movieReleaseLeadDays = leadDays
+	return m
+}
+
+// WithAvailabilityGate enables stream-availability checking for movie placeholders.
+func (m *Monitor) WithAvailabilityGate(client *aiostreams.Client, enabled bool) *Monitor {
+	m.client = client
+	m.availabilityGate = enabled
 	return m
 }
 

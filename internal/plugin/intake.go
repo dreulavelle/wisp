@@ -2,12 +2,20 @@ package plugin
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	pluginv1 "github.com/Silo-Server/silo-plugin-sdk/pkg/pluginproto/silo/plugin/v1"
+	"github.com/dreulavelle/wisp/internal/aiostreams"
 )
+
+// errNotYetReleased is returned by writeFor when a movie has no digital or
+// physical home-media release yet. Fulfill maps this to status=queued so Silo
+// retries the request automatically once the film is released.
+var errNotYetReleased = fmt.Errorf("not yet released")
 
 // EpisodeLister enumerates the episodes of a series that have already aired.
 //
@@ -34,6 +42,12 @@ type Intake struct {
 	anime    AnimeClassifier
 	pusher   *ScanPusher
 	log      *slog.Logger
+
+	client               *aiostreams.Client
+	tmdbAPIKey           string
+	tmdbRegion           string
+	movieReleaseLeadDays int
+	availabilityGate     bool
 }
 
 // NewIntake wires request handling over a placeholder writer.
@@ -69,6 +83,27 @@ func (i *Intake) WithAnimeClassifier(c AnimeClassifier) *Intake {
 // the host did supply, so a request without a TVDB id is not simply refused.
 func (i *Intake) WithIdentityResolver(r IdentityResolver) *Intake {
 	i.identity = r
+	return i
+}
+
+// WithTMDB configures the TMDB release-date gate.
+//
+// apiKey may be a v4 bearer token (long JWT) or a legacy v3 API key.
+// region is a comma-separated list of ISO-3166-1 codes (e.g. "US,GB,CA");
+// the gate passes if any region has a Digital or Physical release.
+// leadDays allows writing the placeholder up to N days before the release date.
+func (i *Intake) WithTMDB(apiKey, region string, leadDays int) *Intake {
+	i.tmdbAPIKey = apiKey
+	i.tmdbRegion = region
+	i.movieReleaseLeadDays = leadDays
+	return i
+}
+
+// WithAvailabilityGate enables checking that the stream source has at least
+// one playable URL before writing a movie placeholder.
+func (i *Intake) WithAvailabilityGate(client *aiostreams.Client, enabled bool) *Intake {
+	i.client = client
+	i.availabilityGate = enabled
 	return i
 }
 
@@ -141,7 +176,12 @@ func (i *Intake) Fulfill(ctx context.Context, req *pluginv1.FulfillRequest) (*pl
 			ConnectionId: connectionID,
 			ExternalId:   id.String(),
 		}
-		if err != nil {
+		if err != nil && errors.Is(err, errNotYetReleased) {
+			i.log.Info("intake: movie not yet on home media; queuing for later",
+				"title", desc.GetTitle(), "id", id.String())
+			target.Status = "queued"
+			target.Message = err.Error()
+		} else if err != nil {
 			i.log.Error("intake: placeholder write failed",
 				"title", desc.GetTitle(), "id", id.String(), "quality", q.GetId(), "error", err)
 			target.Status = "failed"
@@ -175,6 +215,34 @@ func (i *Intake) writeFor(ctx context.Context, mediaType string, desc *pluginv1.
 	}
 
 	if mediaType == "movie" {
+		// Release gate: skip movies that have no digital/physical release yet.
+		if i.tmdbAPIKey != "" || i.availabilityGate {
+			var (
+				released    time.Time
+				metadataErr error
+			)
+			if i.tmdbAPIKey != "" {
+				released, metadataErr = fetchTMDBMovieRelease(ctx, id.Value, i.tmdbAPIKey, i.tmdbRegion)
+			}
+			if metadataErr != nil && imdb != "" {
+				// Cinemeta fallback: only for the release date, not as a substitute
+				// for a confirmed digital/physical TMDB release.
+				released, metadataErr = fetchCinemetaMovieMetadata(ctx, imdb)
+			}
+			eligible := metadataErr == nil && !released.IsZero() &&
+				!time.Now().Before(released.AddDate(0, 0, -i.movieReleaseLeadDays))
+			if eligible && i.availabilityGate && i.client != nil {
+				eligible = hasPlayableStream(ctx, i.client, mediaType, imdb, 0, 0, quality)
+			}
+			if !eligible {
+				releaseStr := "unknown date"
+				if metadataErr == nil && !released.IsZero() {
+					releaseStr = released.Format("2006-01-02")
+				}
+				return 0, fmt.Errorf("movie not yet released digitally/physically (release: %s): %w",
+					releaseStr, errNotYetReleased)
+			}
+		}
 		path, err := i.writeOne(base)
 		if err != nil {
 			return 0, err
