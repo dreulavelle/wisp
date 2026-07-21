@@ -305,10 +305,15 @@ done
 # ---------------------------------------------------------------------------
 step "Checking placeholders were NOT probed"
 # Probing one would reach out to the resolver from inside a library scan,
-# turning a full scan into a resolution storm against the provider.
-PROBED="$(psql_q "select count(*) from media_files where file_path like '%.strm' and probe_source is not null and probe_source <> '';")"
+# turning a full scan into a resolution storm against the provider. The
+# scanner records probe_source='placeholder' as the reason it did NOT probe —
+# that marker is expected. Anything else means a real ffprobe ran.
+PROBED="$(psql_q "select count(*) from media_files where file_path like '%.strm' and probe_source is not null and probe_source not in ('', 'placeholder');")"
 [[ "${PROBED:-0}" == "0" ]] && pass "no placeholder was probed at scan time" \
-  || fail "$PROBED placeholder(s) were probed"
+  || fail "$PROBED placeholder(s) were probed for real"
+UNMARKED="$(psql_q "select count(*) from media_files where file_path like '%.strm' and (probe_source is null or probe_source = '');")"
+[[ "${UNMARKED:-0}" == "0" ]] && pass "every placeholder carries the not-probed marker" \
+  || fail "$UNMARKED placeholder(s) lack probe_source='placeholder' and will haunt the repair loop"
 
 # ---------------------------------------------------------------------------
 step "Checking the repair loop does not re-queue placeholders"
