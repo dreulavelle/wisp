@@ -1,5 +1,13 @@
 # Changelog
 
+## [2.0.3](https://github.com/dreulavelle/wisp/compare/v2.0.2...v2.0.3) (2026-07-21)
+
+
+### Bug Fixes
+
+* **plugin:** serve the dashboard before configuration ([0840eee](https://github.com/dreulavelle/wisp/commit/0840eeec162276c7bd4e03ecf0d4b751542429d1))
+* **plugin:** stop autoscan going silently deaf after a restart ([0751d02](https://github.com/dreulavelle/wisp/commit/0751d021b614e4d502d478ce9e68a458a432dd85))
+
 ## [2.0.2](https://github.com/dreulavelle/wisp/compare/v2.0.1...v2.0.2) (2026-07-21)
 
 
