@@ -150,6 +150,20 @@ The end-to-end suite installs the real plugin into a real Silo and plays back
 through it. It is the only test covering the seam between plugin and host, and
 it stubs AIOStreams so provider health cannot turn the suite into a coin flip.
 
+## Releases
+
+Wisp is stabilising, so version numbers are kept quiet on purpose.
+
+- Do **not** mark changes `feat!:` or add a `BREAKING CHANGE:` footer while
+  stabilising. Both cut a major release, and a major that arrives every few
+  hours tells a reader nothing. Describe the break in the body instead.
+- Do **not** force-merge release PRs (`--squash --admin`) while other work is
+  being rebased onto main. release-please anchors on the commits it recorded;
+  rewriting them under it makes it lose its place and regenerate the entire
+  changelog from the beginning.
+- Let release PRs accumulate. One release describing a working state beats six
+  describing a moving one.
+
 ## License
 
 MIT
