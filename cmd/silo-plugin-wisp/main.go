@@ -123,7 +123,7 @@ func (s *runtimeServer) Configure(ctx context.Context, req *pluginv1.ConfigureRe
 
 	signer := s.signerFor(ctx, next)
 
-	resolver := plugin.NewResolver(client)
+	resolver := plugin.NewResolverWith(client, s.log)
 	s.routes.SetHandler(plugin.NewRouterWith(plugin.RouterOptions{
 		Resolver: resolver,
 		Log:      s.log,

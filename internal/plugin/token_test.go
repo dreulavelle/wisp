@@ -93,7 +93,7 @@ func TestResolveRejectsUnsignedRequests(t *testing.T) {
 	stub := &stubSearcher{streams: []aiostreams.Stream{{URL: "https://cdn/a.mkv", Resolution: "1080p"}}}
 	signer := NewSigner("seed")
 	rt := NewRouterWith(RouterOptions{
-		Resolver: NewResolver(stub),
+		Resolver: alwaysLive(NewResolver(stub)),
 		Log:      slog.New(slog.DiscardHandler),
 		Signer:   signer,
 	})
@@ -114,7 +114,7 @@ func TestResolveAcceptsSignedRequests(t *testing.T) {
 	stub := &stubSearcher{streams: []aiostreams.Stream{{URL: "https://cdn/a.mkv", Resolution: "1080p"}}}
 	signer := NewSigner("seed")
 	rt := NewRouterWith(RouterOptions{
-		Resolver: NewResolver(stub),
+		Resolver: alwaysLive(NewResolver(stub)),
 		Log:      slog.New(slog.DiscardHandler),
 		Signer:   signer,
 	})
@@ -137,7 +137,7 @@ func TestResolveAcceptsSignedRequests(t *testing.T) {
 // an oracle for enumerating a library.
 func TestUnsignedRejectionLooksLikeAnUnknownPath(t *testing.T) {
 	rt := NewRouterWith(RouterOptions{
-		Resolver: NewResolver(&stubSearcher{}),
+		Resolver: alwaysLive(NewResolver(&stubSearcher{})),
 		Log:      slog.New(slog.DiscardHandler),
 		Signer:   NewSigner("seed"),
 	})

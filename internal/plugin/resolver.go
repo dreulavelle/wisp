@@ -11,10 +11,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/dreulavelle/wisp/internal/aiostreams"
 )
@@ -117,11 +120,32 @@ type searcher interface {
 // Resolver answers playback-time resolution requests.
 type Resolver struct {
 	streams searcher
+	log     *slog.Logger
+
+	// probe performs liveness checks. Redirects are followed, because a
+	// provider handing out a redirect to its CDN is the normal case.
+	probe *http.Client
+
+	// live is the liveness check, swappable so tests can drive both outcomes
+	// without standing up a provider. Nil means use the real one.
+	live func(ctx context.Context, rawURL string) error
 }
 
 // NewResolver builds a resolver over an AIOStreams client.
 func NewResolver(streams searcher) *Resolver {
-	return &Resolver{streams: streams}
+	return NewResolverWith(streams, nil)
+}
+
+// NewResolverWith builds a resolver with a logger.
+func NewResolverWith(streams searcher, log *slog.Logger) *Resolver {
+	if log == nil {
+		log = slog.New(slog.DiscardHandler)
+	}
+	return &Resolver{
+		streams: streams,
+		log:     log,
+		probe:   &http.Client{Timeout: liveCheckTimeout},
+	}
 }
 
 // ErrNoMatch means nothing playable was found for the request.
@@ -132,12 +156,36 @@ var ErrNoMatch = errors.New("plugin: no playable stream for this title")
 // one; this indicates a hand-written or truncated placeholder.
 var ErrNoLookupKey = errors.New("plugin: request has no IMDb lookup key")
 
+// liveChecks bounds how many candidates are checked for liveness before giving
+// up. Each check is a small range request, and this sits inside the wait before
+// playback starts — enough to get past a run of dead links without turning a
+// missing title into a long stall.
+const liveChecks = 4
+
+// liveCheckTimeout bounds one liveness check.
+//
+// Deliberately short. This is a request for the first byte of a file the
+// provider claims to have ready — a provider that cannot answer that quickly is
+// not going to stream a film smoothly either, and the cost of being wrong is
+// small: the next candidate is tried. Every second here is a second a viewer
+// spends looking at a spinner, and it is paid on the highest-ranked candidate
+// even when that one is fine.
+const liveCheckTimeout = 3 * time.Second
+
 // Resolve returns a directly playable URL for a request.
 //
 // Candidate ordering is AIOStreams' own: it already parses, ranks, and filters
 // according to the operator's configuration, so re-sorting here would silently
 // override settings made in one obvious place. Selection is therefore "first
-// candidate at an acceptable quality".
+// candidate at an acceptable quality THAT IS ACTUALLY SERVING BYTES".
+//
+// That last part is not re-ranking, it is liveness. A debrid provider answers
+// an uncached title with "202 Accepted, Content-Length: 0" — a promise to
+// fetch it, not a stream — and also serves 502s and connection timeouts.
+// Measured against one real title, five of fourteen ranked candidates were
+// dead, including the top-ranked one. Handing any of those to a player gets
+// "Invalid data found when processing input" and a failed playback that looks
+// like a Wisp bug rather than an unavailable release.
 func (r *Resolver) Resolve(ctx context.Context, req ResolveRequest) (aiostreams.Stream, error) {
 	// AIOStreams accepts IMDb ids and nothing else: tmdb: and tvdb: ids return
 	// zero candidates against a live instance. Without a lookup key there is
@@ -152,17 +200,119 @@ func (r *Resolver) Resolve(ctx context.Context, req ResolveRequest) (aiostreams.
 	}
 
 	for _, tier := range acceptableTiers(req.Quality) {
+		var candidates []aiostreams.Stream
 		for _, s := range streams {
 			if !isPlayableURL(s.URL) {
 				continue
 			}
-			if tier == "" || strings.EqualFold(s.Resolution, tier) {
-				return s, nil
+			if tier != "" && !strings.EqualFold(s.Resolution, tier) {
+				continue
 			}
+			candidates = append(candidates, s)
+			if len(candidates) >= liveChecks {
+				break
+			}
+		}
+		if len(candidates) == 0 {
+			continue
+		}
+		if picked, ok := r.firstLive(ctx, candidates); ok {
+			return picked, nil
 		}
 	}
 	return aiostreams.Stream{}, ErrNoMatch
 }
+
+// firstLive returns the earliest candidate that is actually serving.
+//
+// The checks run concurrently but the RESULT is taken in rank order, so
+// AIOStreams' ordering is preserved exactly — this only skips what is broken,
+// it never promotes anything. Sequential checking cost the sum of every dead
+// candidate's timeout, which measured at nearly eight seconds on a title whose
+// top-ranked link was unreachable; in parallel it is one round trip.
+//
+// When nothing verifies, the best candidate is returned anyway rather than
+// failing: an unverified stream may still play, and a definite failure is worse
+// than a probable success.
+func (r *Resolver) firstLive(ctx context.Context, candidates []aiostreams.Stream) (aiostreams.Stream, bool) {
+	checkCtx, cancel := context.WithCancel(ctx)
+	// Cancelling on the way out abandons checks still in flight: once the
+	// answer is known, the rest are wasted work against someone's provider.
+	defer cancel()
+
+	results := make([]chan error, len(candidates))
+	for i := range candidates {
+		results[i] = make(chan error, 1)
+		go func(i int) {
+			results[i] <- r.liveCheck(checkCtx, candidates[i].URL)
+		}(i)
+	}
+
+	// Consumed in rank order, not completion order. A faster lower-ranked
+	// candidate must not overtake a slower higher-ranked one, or liveness
+	// quietly becomes re-ranking by latency.
+	for i := range candidates {
+		err := <-results[i]
+		if err == nil {
+			return candidates[i], true
+		}
+		r.log.Info("resolve: skipping a candidate that is not serving",
+			"resolution", candidates[i].Resolution,
+			"filename", candidates[i].Filename, "reason", err)
+	}
+
+	r.log.Warn("resolve: no candidate verified as serving; returning the best one unchecked",
+		"checked", len(candidates))
+	return candidates[0], true
+}
+
+// liveCheck runs the configured liveness check.
+func (r *Resolver) liveCheck(ctx context.Context, rawURL string) error {
+	if r.live != nil {
+		return r.live(ctx, rawURL)
+	}
+	return r.checkLive(ctx, rawURL)
+}
+
+// checkLive reports whether a candidate is actually serving media bytes.
+//
+// A range request rather than a HEAD: providers in this ecosystem answer HEAD
+// inconsistently, and asking for the first bytes is the same thing a player
+// does first, so a success here means what it appears to mean.
+func (r *Resolver) checkLive(ctx context.Context, rawURL string) error {
+	checkCtx, cancel := context.WithTimeout(ctx, liveCheckTimeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(checkCtx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Range", "bytes=0-0")
+	// Some providers reject the default Go agent outright.
+	req.Header.Set("User-Agent", liveCheckUserAgent)
+
+	resp, err := r.probe.Do(req)
+	if err != nil {
+		return fmt.Errorf("unreachable")
+	}
+	defer func() {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<10))
+		_ = resp.Body.Close()
+	}()
+
+	switch resp.StatusCode {
+	case http.StatusOK, http.StatusPartialContent:
+		return nil
+	case http.StatusAccepted:
+		// The provider is fetching it. Truthful, and useless right now.
+		return fmt.Errorf("not cached yet (HTTP 202)")
+	default:
+		return fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+}
+
+// liveCheckUserAgent identifies liveness checks to providers.
+const liveCheckUserAgent = "wisp/1.0"
 
 // isPlayableURL reports whether a candidate is safe to redirect a client to.
 //

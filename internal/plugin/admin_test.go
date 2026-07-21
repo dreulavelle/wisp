@@ -74,7 +74,7 @@ func TestAdminSettingsNeverExposesTheAIOStreamsURL(t *testing.T) {
 }
 
 func TestAdminStatusShape(t *testing.T) {
-	rt, h := testRouter(t, NewResolver(&stubSearcher{}))
+	rt, h := testRouter(t, alwaysLive(NewResolver(&stubSearcher{})))
 	rt.library.Add(Placeholder{Path: "/library/Movies/A/A.strm", ID: MediaID{SourceTMDB, "603"}, IMDbID: "tt0133093"})
 
 	rec := httptest.NewRecorder()
@@ -95,9 +95,9 @@ func TestAdminStatusShape(t *testing.T) {
 // The dashboard's whole diagnostic value is showing where resolve time goes,
 // so a resolve must leave a trace behind.
 func TestResolveIsRecordedForTheDashboard(t *testing.T) {
-	rt, h := testRouter(t, NewResolver(&stubSearcher{streams: []aiostreams.Stream{
+	rt, h := testRouter(t, alwaysLive(NewResolver(&stubSearcher{streams: []aiostreams.Stream{
 		{URL: "https://cdn/a.mkv", Resolution: "1080p", Filename: "A.1080p.mkv"},
-	}}))
+	}})))
 	rt.library.Add(Placeholder{Path: "/library/Movies/A/A.strm", ID: MediaID{SourceTMDB, "603"}, IMDbID: "tt0133093"})
 
 	rec := httptest.NewRecorder()
@@ -124,9 +124,9 @@ func TestResolveIsRecordedForTheDashboard(t *testing.T) {
 }
 
 func TestFailedResolveIsRecordedWithoutLeakingDetail(t *testing.T) {
-	rt, h := testRouter(t, NewResolver(&stubSearcher{
+	rt, h := testRouter(t, alwaysLive(NewResolver(&stubSearcher{
 		err: &aiostreams.SearchError{Kind: aiostreams.KindTransient},
-	}))
+	})))
 	rt.library.Add(Placeholder{Path: "/library/Movies/A/A.strm", ID: MediaID{SourceTMDB, "603"}, IMDbID: "tt0133093"})
 
 	rec := httptest.NewRecorder()

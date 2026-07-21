@@ -31,9 +31,9 @@ func TestHTTPRoutesUnconfigured(t *testing.T) {
 // with no other symptom.
 func TestHTTPRoutesPreservesRedirect(t *testing.T) {
 	routes := NewHTTPRoutes()
-	resolver := NewResolver(&stubSearcher{streams: []aiostreams.Stream{
+	resolver := alwaysLive(NewResolver(&stubSearcher{streams: []aiostreams.Stream{
 		{URL: "https://cdn.example.com/movie.mkv?token=abc", Resolution: "1080p"},
-	}})
+	}}))
 	routes.SetHandler(NewRouter(resolver, slog.New(slog.DiscardHandler)).Handler())
 
 	resp, err := routes.Handle(context.Background(), &pluginv1.HandleHTTPRequest{
@@ -62,7 +62,7 @@ func TestHTTPRoutesPassesQueryParameters(t *testing.T) {
 		{URL: "https://cdn/1080.mkv", Resolution: "1080p"},
 		{URL: "https://cdn/2160.mkv", Resolution: "2160p"},
 	}}
-	routes.SetHandler(NewRouter(NewResolver(stub), slog.New(slog.DiscardHandler)).Handler())
+	routes.SetHandler(NewRouter(alwaysLive(NewResolver(stub)), slog.New(slog.DiscardHandler)).Handler())
 
 	query, err := structpb.NewStruct(map[string]any{"quality": "2160p", "imdb": "tt0133093"})
 	if err != nil {
@@ -123,7 +123,7 @@ func TestHTTPRoutesHealth(t *testing.T) {
 // distinguishable so the media server can retry rather than give up.
 func TestHTTPRoutesNoStreamIsRetryable(t *testing.T) {
 	routes := NewHTTPRoutes()
-	routes.SetHandler(NewRouter(NewResolver(&stubSearcher{}), slog.New(slog.DiscardHandler)).Handler())
+	routes.SetHandler(NewRouter(alwaysLive(NewResolver(&stubSearcher{})), slog.New(slog.DiscardHandler)).Handler())
 
 	resp, err := routes.Handle(context.Background(), &pluginv1.HandleHTTPRequest{
 		Method: http.MethodGet, Path: "/resolve/movie/tmdb:603",
@@ -139,7 +139,7 @@ func TestHTTPRoutesNoStreamIsRetryable(t *testing.T) {
 
 func TestHTTPRoutesBadPath(t *testing.T) {
 	routes := NewHTTPRoutes()
-	routes.SetHandler(NewRouter(NewResolver(&stubSearcher{}), slog.New(slog.DiscardHandler)).Handler())
+	routes.SetHandler(NewRouter(alwaysLive(NewResolver(&stubSearcher{})), slog.New(slog.DiscardHandler)).Handler())
 
 	resp, err := routes.Handle(context.Background(), &pluginv1.HandleHTTPRequest{
 		Method: http.MethodGet, Path: "/resolve/movie/not-an-id",
@@ -157,7 +157,7 @@ func TestHTTPRoutesDoesNotLeakUpstreamDetail(t *testing.T) {
 	secret := "https://user:hunter2@aiostreams.internal/stremio/SECRETUUID"
 	routes := NewHTTPRoutes()
 	routes.SetHandler(NewRouter(
-		NewResolver(&stubSearcher{err: &aiostreams.SearchError{Kind: aiostreams.KindTransient}}),
+		alwaysLive(NewResolver(&stubSearcher{err: &aiostreams.SearchError{Kind: aiostreams.KindTransient}})),
 		slog.New(slog.DiscardHandler),
 	).Handler())
 

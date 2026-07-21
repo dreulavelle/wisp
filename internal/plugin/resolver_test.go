@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strconv"
+	"sync/atomic"
 	"testing"
 
 	"github.com/dreulavelle/wisp/internal/aiostreams"
@@ -104,7 +106,7 @@ func TestResolvePicksRequestedQuality(t *testing.T) {
 		{URL: "https://cdn/2160.mkv", Resolution: "2160p", Filename: "a.2160p.mkv"},
 	}}
 
-	got, err := NewResolver(stub).Resolve(context.Background(), ResolveRequest{
+	got, err := alwaysLive(NewResolver(stub)).Resolve(context.Background(), ResolveRequest{
 		MediaType: "movie", ID: MediaID{SourceTMDB, "603"}, IMDbID: "tt0133093", Quality: "2160p",
 	})
 	if err != nil {
@@ -122,7 +124,7 @@ func TestResolveFallsBackWhenTierMissing(t *testing.T) {
 		{URL: "https://cdn/1080.mkv", Resolution: "1080p"},
 	}}
 
-	got, err := NewResolver(stub).Resolve(context.Background(), ResolveRequest{
+	got, err := alwaysLive(NewResolver(stub)).Resolve(context.Background(), ResolveRequest{
 		MediaType: "movie", ID: MediaID{SourceTMDB, "603"}, IMDbID: "tt0133093", Quality: "2160p",
 	})
 	if err != nil {
@@ -141,7 +143,7 @@ func TestResolveHonoursAddonOrderingWithinATier(t *testing.T) {
 		{URL: "https://cdn/second.mkv", Resolution: "1080p"},
 	}}
 
-	got, err := NewResolver(stub).Resolve(context.Background(), ResolveRequest{
+	got, err := alwaysLive(NewResolver(stub)).Resolve(context.Background(), ResolveRequest{
 		MediaType: "movie", ID: MediaID{SourceTMDB, "603"}, IMDbID: "tt0133093", Quality: "1080p",
 	})
 	if err != nil {
@@ -158,7 +160,7 @@ func TestResolveNoQualityTakesFirstPlayable(t *testing.T) {
 		{URL: "https://cdn/ok.mkv", Resolution: "720p"},
 	}}
 
-	got, err := NewResolver(stub).Resolve(context.Background(), ResolveRequest{
+	got, err := alwaysLive(NewResolver(stub)).Resolve(context.Background(), ResolveRequest{
 		MediaType: "movie", ID: MediaID{SourceTMDB, "603"}, IMDbID: "tt0133093",
 	})
 	if err != nil {
@@ -175,7 +177,7 @@ func TestResolveSkipsEmptyURLsAtRequestedTier(t *testing.T) {
 		{URL: "https://cdn/good.mkv", Resolution: "1080p"},
 	}}
 
-	got, err := NewResolver(stub).Resolve(context.Background(), ResolveRequest{
+	got, err := alwaysLive(NewResolver(stub)).Resolve(context.Background(), ResolveRequest{
 		MediaType: "movie", ID: MediaID{SourceTMDB, "603"}, IMDbID: "tt0133093", Quality: "1080p",
 	})
 	if err != nil {
@@ -192,7 +194,7 @@ func TestResolveNoPlayableCandidates(t *testing.T) {
 		{URL: "   ", Resolution: "2160p"},
 	}}
 
-	_, err := NewResolver(stub).Resolve(context.Background(), ResolveRequest{
+	_, err := alwaysLive(NewResolver(stub)).Resolve(context.Background(), ResolveRequest{
 		MediaType: "movie", ID: MediaID{SourceTMDB, "603"}, IMDbID: "tt0133093",
 	})
 	if !errors.Is(err, ErrNoMatch) {
@@ -204,7 +206,7 @@ func TestResolvePropagatesSearchError(t *testing.T) {
 	sentinel := errors.New("upstream exploded")
 	stub := &stubSearcher{err: sentinel}
 
-	_, err := NewResolver(stub).Resolve(context.Background(), ResolveRequest{
+	_, err := alwaysLive(NewResolver(stub)).Resolve(context.Background(), ResolveRequest{
 		MediaType: "movie", ID: MediaID{SourceTMDB, "603"}, IMDbID: "tt0133093",
 	})
 	if !errors.Is(err, sentinel) {
@@ -215,7 +217,7 @@ func TestResolvePropagatesSearchError(t *testing.T) {
 func TestResolvePassesEpisodeCoordinates(t *testing.T) {
 	stub := &stubSearcher{streams: []aiostreams.Stream{{URL: "https://cdn/a.mkv", Resolution: "1080p"}}}
 
-	_, err := NewResolver(stub).Resolve(context.Background(), ResolveRequest{
+	_, err := alwaysLive(NewResolver(stub)).Resolve(context.Background(), ResolveRequest{
 		MediaType: "series", ID: MediaID{SourceTVDB, "121361"}, IMDbID: "tt0944947", Season: 3, Episode: 9,
 	})
 	if err != nil {
@@ -272,9 +274,9 @@ func TestResolveRejectsNonHTTPCandidates(t *testing.T) {
 		"https://", // no host
 		"   ",
 	} {
-		r := NewResolver(&stubSearcher{streams: []aiostreams.Stream{
+		r := alwaysLive(NewResolver(&stubSearcher{streams: []aiostreams.Stream{
 			{URL: bad, Resolution: "1080p"},
-		}})
+		}}))
 		_, err := r.Resolve(context.Background(), ResolveRequest{
 			MediaType: "movie", IMDbID: "tt1", Quality: "1080p",
 		})
@@ -286,10 +288,10 @@ func TestResolveRejectsNonHTTPCandidates(t *testing.T) {
 
 // Skipping an unusable candidate must not skip the rest of the list.
 func TestResolveSkipsBadCandidateAndTakesTheNext(t *testing.T) {
-	r := NewResolver(&stubSearcher{streams: []aiostreams.Stream{
+	r := alwaysLive(NewResolver(&stubSearcher{streams: []aiostreams.Stream{
 		{URL: "file:///etc/passwd", Resolution: "1080p"},
 		{URL: "https://cdn.example.invalid/real.mkv", Resolution: "1080p"},
-	}})
+	}}))
 	got, err := r.Resolve(context.Background(), ResolveRequest{
 		MediaType: "movie", IMDbID: "tt1", Quality: "1080p",
 	})
@@ -298,5 +300,94 @@ func TestResolveSkipsBadCandidateAndTakesTheNext(t *testing.T) {
 	}
 	if got.URL != "https://cdn.example.invalid/real.mkv" {
 		t.Errorf("URL = %q, want the second candidate", got.URL)
+	}
+}
+
+// alwaysLive disables liveness checking for tests whose candidates are
+// synthetic URLs with nothing behind them.
+func alwaysLive(r *Resolver) *Resolver {
+	r.live = func(context.Context, string) error { return nil }
+	return r
+}
+
+// A debrid provider answers an uncached title with "202 Accepted,
+// Content-Length: 0" — a promise to fetch it, not a stream. Handing that to a
+// player produces "Invalid data found when processing input" and a failure that
+// looks like a Wisp bug rather than an unavailable release. Measured against a
+// real title, five of fourteen ranked candidates were dead, the top one
+// included.
+func TestResolveSkipsCandidatesThatAreNotServing(t *testing.T) {
+	dead := map[string]bool{
+		"https://cdn.example.invalid/not-cached.mkv":  true,
+		"https://cdn.example.invalid/bad-gateway.mkv": true,
+	}
+	r := NewResolver(&stubSearcher{streams: []aiostreams.Stream{
+		{URL: "https://cdn.example.invalid/not-cached.mkv", Resolution: "1080p", Filename: "a"},
+		{URL: "https://cdn.example.invalid/bad-gateway.mkv", Resolution: "1080p", Filename: "b"},
+		{URL: "https://cdn.example.invalid/works.mkv", Resolution: "1080p", Filename: "c"},
+	}})
+	r.live = func(_ context.Context, u string) error {
+		if dead[u] {
+			return errors.New("not serving")
+		}
+		return nil
+	}
+
+	got, err := r.Resolve(context.Background(), ResolveRequest{
+		MediaType: "movie", IMDbID: "tt1", Quality: "1080p",
+	})
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	if got.URL != "https://cdn.example.invalid/works.mkv" {
+		t.Errorf("URL = %q, want the first candidate that was actually serving", got.URL)
+	}
+}
+
+// The check must not become a new way to fail playback. Once the budget is
+// spent the best remaining candidate is returned unverified: it may still play,
+// and a definite failure is worse than a probable success.
+func TestResolveReturnsUnverifiedCandidateAfterBudget(t *testing.T) {
+	var streams []aiostreams.Stream
+	for i := 0; i < liveChecks+3; i++ {
+		streams = append(streams, aiostreams.Stream{
+			URL: "https://cdn.example.invalid/" + strconv.Itoa(i) + ".mkv", Resolution: "1080p",
+		})
+	}
+	// Checks run concurrently now, so the counter has to be safe.
+	var checks atomic.Int32
+	r := NewResolver(&stubSearcher{streams: streams})
+	r.live = func(context.Context, string) error {
+		checks.Add(1)
+		return errors.New("not serving")
+	}
+
+	got, err := r.Resolve(context.Background(), ResolveRequest{
+		MediaType: "movie", IMDbID: "tt1", Quality: "1080p",
+	})
+	if err != nil {
+		t.Fatalf("Resolve() returned no stream at all: %v", err)
+	}
+	if got.URL == "" {
+		t.Error("returned an empty stream")
+	}
+	if got := int(checks.Load()); got != liveChecks {
+		t.Errorf("ran %d checks, want the budget of %d", got, liveChecks)
+	}
+}
+
+// Liveness must not reorder anything: AIOStreams' own first serving candidate
+// at the requested tier still wins.
+func TestResolveLivenessDoesNotReorderCandidates(t *testing.T) {
+	r := alwaysLive(NewResolver(&stubSearcher{streams: []aiostreams.Stream{
+		{URL: "https://cdn.example.invalid/first.mkv", Resolution: "1080p"},
+		{URL: "https://cdn.example.invalid/second.mkv", Resolution: "1080p"},
+	}}))
+
+	got, err := r.Resolve(context.Background(), ResolveRequest{
+		MediaType: "movie", IMDbID: "tt1", Quality: "1080p",
+	})
+	if err != nil || got.URL != "https://cdn.example.invalid/first.mkv" {
+		t.Errorf("got %q (%v), want AIOStreams' own first candidate", got.URL, err)
 	}
 }
