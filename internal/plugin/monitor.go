@@ -32,6 +32,7 @@ type Monitor struct {
 	library  *Library
 	writer   *Writer
 	episodes EpisodeLister
+	pusher   *ScanPusher
 	log      *slog.Logger
 }
 
@@ -40,7 +41,20 @@ func NewMonitor(library *Library, writer *Writer, episodes EpisodeLister, log *s
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
-	return &Monitor{library: library, writer: writer, episodes: episodes, log: log}
+	return &Monitor{
+		library: library, writer: writer, episodes: episodes, log: log,
+		// Non-nil so Run can push unconditionally; a pusher with no publisher
+		// is a no-op.
+		pusher: NewScanPusher(nil, log),
+	}
+}
+
+// WithScanPusher makes newly filled episodes reported to the host immediately.
+func (m *Monitor) WithScanPusher(p *ScanPusher) *Monitor {
+	if p != nil {
+		m.pusher = p
+	}
+	return m
 }
 
 // series is one show Wisp already tracks, derived from its placeholders.
@@ -72,6 +86,7 @@ func (m *Monitor) Run(ctx context.Context, req *pluginv1.RunScheduledTaskRequest
 	}
 
 	written, failed := 0, 0
+	var pushed []string
 	for _, s := range shows {
 		// Honour cancellation between shows: the host bounds a task run, and a
 		// library with many series should stop cleanly rather than be killed
@@ -119,6 +134,7 @@ func (m *Monitor) Run(ctx context.Context, req *pluginv1.RunScheduledTaskRequest
 				Season: ep.Season, Episode: ep.Episode, Quality: s.quality,
 			})
 			written++
+			pushed = append(pushed, path)
 			m.log.Info("monitor: new episode",
 				"title", s.title, "season", ep.Season, "episode", ep.Episode)
 		}
@@ -128,6 +144,9 @@ func (m *Monitor) Run(ctx context.Context, req *pluginv1.RunScheduledTaskRequest
 		m.log.Info("monitor: pass complete",
 			"series", len(shows), "written", written, "failed", failed)
 	}
+	// One push for the whole pass. A pass that fills in a dozen shows should
+	// cost the host one ingest, not one per episode.
+	m.pusher.Push(ctx, pushed)
 	return &pluginv1.RunScheduledTaskResponse{}, nil
 }
 

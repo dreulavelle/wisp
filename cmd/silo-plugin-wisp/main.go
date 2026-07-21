@@ -167,10 +167,18 @@ func (s *runtimeServer) Configure(ctx context.Context, req *pluginv1.ConfigureRe
 		// expect without needing a TVDB key of our own. The same service backs
 		// the anime classifier.
 		meta := plugin.NewMetadataAdapter(metadata.New())
+
+		// Report placeholders to Silo the moment they are written. Without
+		// this they wait for autoscan's next poll — up to ten minutes on the
+		// default interval, which for on-demand playback is the entire delay
+		// between requesting something and being able to watch it.
+		pusher := plugin.NewScanPusher(hostEvents(), s.log)
+
 		s.router.SetIntake(plugin.NewIntake(writer, s.library, meta, s.log).
 			WithIdentityResolver(meta).
-			WithAnimeClassifier(meta))
-		s.monitor.Set(plugin.NewMonitor(s.library, writer, meta, s.log))
+			WithAnimeClassifier(meta).
+			WithScanPusher(pusher))
+		s.monitor.Set(plugin.NewMonitor(s.library, writer, meta, s.log).WithScanPusher(pusher))
 	} else {
 		s.log.Warn("configure: no library path set; requests cannot create placeholders")
 	}
@@ -236,6 +244,17 @@ func (s *runtimeServer) persistSigningSecret(ctx context.Context, secret string)
 		return fmt.Errorf("no host connection")
 	}
 	return host.SetGlobalConfigEntry(ctx, signingConfigKey, map[string]any{"secret": secret})
+}
+
+// hostEvents returns the host connection used to publish events, or nil when
+// there is none. A nil publisher makes every push a no-op, so a plugin running
+// without a host simply falls back to being polled.
+func hostEvents() plugin.EventPublisher {
+	host := sdkruntime.Host()
+	if host == nil {
+		return nil
+	}
+	return host
 }
 
 // resolverBase is the URL placeholders point at.

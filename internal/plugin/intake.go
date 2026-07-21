@@ -32,6 +32,7 @@ type Intake struct {
 	episodes EpisodeLister
 	identity IdentityResolver
 	anime    AnimeClassifier
+	pusher   *ScanPusher
 	log      *slog.Logger
 }
 
@@ -40,7 +41,21 @@ func NewIntake(writer *Writer, library *Library, episodes EpisodeLister, log *sl
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
-	return &Intake{writer: writer, library: library, episodes: episodes, log: log}
+	return &Intake{
+		writer: writer, library: library, episodes: episodes, log: log,
+		// Non-nil by default so every call site can push unconditionally; a
+		// pusher with no publisher is a no-op.
+		pusher: NewScanPusher(nil, log),
+	}
+}
+
+// WithScanPusher makes written placeholders reported to the host immediately,
+// rather than waiting to be polled.
+func (i *Intake) WithScanPusher(p *ScanPusher) *Intake {
+	if p != nil {
+		i.pusher = p
+	}
+	return i
 }
 
 // WithAnimeClassifier enables routing anime into its own library roots. When
@@ -165,6 +180,7 @@ func (i *Intake) writeFor(ctx context.Context, mediaType string, desc *pluginv1.
 			return 0, err
 		}
 		i.log.Info("intake: placeholder written", "path", path)
+		i.pusher.Push(ctx, []string{path})
 		return 1, nil
 	}
 
@@ -182,13 +198,16 @@ func (i *Intake) writeFor(ctx context.Context, mediaType string, desc *pluginv1.
 		return 0, fmt.Errorf("intake: %s has no aired episodes yet", desc.GetTitle())
 	}
 
-	written := 0
-	var firstErr error
+	var (
+		paths    []string
+		firstErr error
+	)
 	for _, ep := range eps {
 		item := base
 		item.Season, item.Episode = ep.Season, ep.Episode
 
-		if _, err := i.writeOne(item); err != nil {
+		path, err := i.writeOne(item)
+		if err != nil {
 			// One bad episode should not sink a whole season. Record the first
 			// failure and keep going, so a request for a 60-episode show still
 			// delivers 59 playable items.
@@ -199,15 +218,19 @@ func (i *Intake) writeFor(ctx context.Context, mediaType string, desc *pluginv1.
 				"title", desc.GetTitle(), "season", ep.Season, "episode", ep.Episode, "error", err)
 			continue
 		}
-		written++
+		paths = append(paths, path)
 	}
 
-	if written == 0 && firstErr != nil {
+	if len(paths) == 0 && firstErr != nil {
 		return 0, firstErr
 	}
 	i.log.Info("intake: series placeholders written",
-		"title", desc.GetTitle(), "id", id.String(), "written", written, "aired", len(eps))
-	return written, nil
+		"title", desc.GetTitle(), "id", id.String(), "written", len(paths), "aired", len(eps))
+	// One push for the whole request rather than one per episode: a season
+	// arriving as 24 separate notifications would have the host resolve and
+	// enqueue 24 times over for work it can do in a single pass.
+	i.pusher.Push(ctx, paths)
+	return len(paths), nil
 }
 
 // writeOne writes a placeholder and records it for the dashboard and autoscan.

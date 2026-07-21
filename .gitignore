@@ -38,3 +38,6 @@ test/e2e/stub-bin
 *~
 .DS_Store
 Thumbs.db
+
+# Local Silo API key for scripts/dev-install.sh — never commit
+scripts/.silo-key
