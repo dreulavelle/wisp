@@ -114,11 +114,14 @@ type Stream struct {
 	Resolution string // e.g. "2160p", "1080p" (from AIOStreams parsedFile)
 }
 
-// New builds a client from an AIOStreams manifest URL and password.
-func New(addonURL, password string) *Client {
+// New builds a client from an AIOStreams manifest URL.
+//
+// The URL is the only input, because it is the only one needed: a full
+// manifest URL carries both halves of the Search API credential.
+func New(addonURL string) *Client {
 	return &Client{
 		addonURL:   strings.TrimSpace(addonURL),
-		basicCreds: deriveCredentials(addonURL, password),
+		basicCreds: deriveCredentials(addonURL),
 		http:       &http.Client{Timeout: 60 * time.Second},
 		cache:      make(map[string]searchCacheEntry),
 		cacheTTL:   searchCacheTTL,
@@ -129,30 +132,19 @@ func New(addonURL, password string) *Client {
 // deriveCredentials works out the basic-auth pair for the Search API.
 //
 // The Search API — unlike the public Stremio /stream/ routes — requires
-// authentication. The pair is the instance id and the encrypted configuration
-// blob, and for the full URL form BOTH of those are already in the URL:
+// authentication, and the pair is the instance id plus the encrypted
+// configuration blob. A full manifest URL already contains both:
 //
 //	/stremio/{uuid}/{config}/manifest.json
 //
-// So no password needs configuring at all. Reading the config segment out of
-// the URL is what makes an install with an empty password work instead of
-// failing every search with a 401 — the operator has already supplied the
-// secret, just as part of the URL they pasted.
+// So there is nothing else to configure, and Wisp asks for nothing else. A
+// separate password field would exist only for the alias form
+// (/stremio/u/{alias}/), which Wisp does not accept — and a field needed only
+// by an unsupported input is a field people fill in wrongly.
 //
-// Precedence, most explicit first:
-//
-//  1. A password already shaped "id:secret" is used verbatim.
-//  2. An explicit password is paired with the id from the URL.
-//  3. The config segment from the URL is paired with the id from the URL.
-//
-// The alias form (/stremio/u/{alias}/manifest.json) carries no config segment,
-// so it genuinely needs a password; that case falls through to an id with no
-// secret, which HasCredentials reports as unusable.
-func deriveCredentials(addonURL, password string) string {
-	password = strings.TrimSpace(password)
-	if strings.Contains(password, ":") {
-		return password
-	}
+// Returns "" when the URL cannot supply a pair, which HasCredentials reports as
+// unusable so the problem surfaces at configuration rather than at playback.
+func deriveCredentials(addonURL string) string {
 	parsed, err := url.Parse(strings.TrimSpace(addonURL))
 	if err != nil {
 		return ""
@@ -163,24 +155,20 @@ func deriveCredentials(addonURL, password string) string {
 			continue
 		}
 
-		id := segments[i+1]
-		next := i + 2
-		if id == "u" && i+2 < len(segments) { // alias form: /stremio/u/{alias}
-			id = segments[i+2]
-			next = i + 3
+		id := strings.TrimSpace(segments[i+1])
+		if id == "" || id == "u" {
+			// The alias form carries no configuration blob, so there is no
+			// secret to be had from it.
+			return ""
 		}
-
-		if password != "" {
-			return id + ":" + password
+		if i+2 >= len(segments) {
+			return ""
 		}
-		// Fall back to the configuration blob carried in the URL. Anything
-		// that is not a trailing resource name is the config segment.
-		if next < len(segments) {
-			if cfg := strings.TrimSpace(segments[next]); cfg != "" && !isResourceSegment(cfg) {
-				return id + ":" + cfg
-			}
+		cfg := strings.TrimSpace(segments[i+2])
+		if cfg == "" || isResourceSegment(cfg) {
+			return ""
 		}
-		return id
+		return id + ":" + cfg
 	}
 	return ""
 }

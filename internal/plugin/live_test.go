@@ -24,7 +24,7 @@ func liveResolver(t *testing.T) *Resolver {
 	if url == "" {
 		t.Skip("WISP_AIOSTREAMS_URL not set; skipping live test")
 	}
-	return NewResolver(aiostreams.New(url, os.Getenv("WISP_AIOSTREAMS_PASSWORD")))
+	return NewResolver(aiostreams.New(url))
 }
 
 var secretish = regexp.MustCompile(`[A-Za-z0-9_-]{16,}`)

@@ -47,7 +47,6 @@ Then fill in:
 | Setting | Value |
 |---|---|
 | AIOStreams URL | The full manifest URL from its configure page |
-| AIOStreams Password | Its password, if it has one |
 | Library Path | Where Wisp writes placeholders, e.g. `/library`. Must be writable by Silo. Wisp creates `movies/`, `tv/`, `anime/movies/` and `anime/shows/` under it. |
 
 Finally, create a Silo library pointed at that same path.

@@ -18,7 +18,6 @@ func main() {
 	root := flag.String("root", "", "library root")
 	base := flag.String("resolver-base", "", "resolver base URL, e.g. http://127.0.0.1:8080/api/v1/plugins/1")
 	aioURL := flag.String("aiostreams-url", "", "AIOStreams URL, seeds the signing key")
-	aioPass := flag.String("aiostreams-password", "", "AIOStreams password, seeds the signing key")
 	quality := flag.String("quality", "1080p", "requested quality tier")
 	flag.Parse()
 
@@ -27,9 +26,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	// The signing key must match what the plugin derives from the same
-	// configuration, or every placeholder is rejected as unsigned.
-	signer := plugin.NewSigner(*aioURL, *aioPass)
+	// The plugin signs new placeholders with a persisted random secret, but it
+	// still ACCEPTS the legacy credential-derived key so placeholders written
+	// before that change keep playing. Signing with the legacy derivation here
+	// exercises exactly that compatibility path — a fixture the running plugin
+	// refuses to verify is a regression this test must catch.
+	signer := plugin.NewSigner(*aioURL, "")
 	writer := plugin.NewWriter(*root, *base, signer)
 
 	items := []plugin.Item{

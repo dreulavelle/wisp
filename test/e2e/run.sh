@@ -38,7 +38,6 @@ ADMIN_PASS="e2e-password-123"
 ADMIN_EMAIL="e2e@example.invalid"
 RESOLVED_TARGET="https://cdn.e2e.invalid/movie.mkv?token=e2e"
 AIO_URL="http://127.0.0.1:${STUB_PORT}/stremio/e2e/manifest.json"
-AIO_PASS="e2e-password"
 
 MODE="plugin"
 case "${1:-}" in
@@ -193,7 +192,7 @@ except Exception: print("")' 2>/dev/null)"
     CFG_CODE="$(curl -s -o /tmp/wisp-e2e-config.json -w '%{http_code}' \
       -X PUT "$BASE/api/v1/admin/plugins/installations/$INSTALL_ID/config" "${AUTH[@]}" \
       -H 'Content-Type: application/json' \
-      -d "{\"key\":\"global\",\"value\":{\"aiostreams_url\":\"$AIO_URL\",\"aiostreams_password\":\"$AIO_PASS\",\"library_path\":\"/library\"}}" 2>/dev/null || true)"
+      -d "{\"key\":\"global\",\"value\":{\"aiostreams_url\":\"$AIO_URL\",\"library_path\":\"/library\"}}" 2>/dev/null || true)"
     if [[ "$CFG_CODE" == "200" || "$CFG_CODE" == "204" ]]; then
       pass "plugin configured"
     else
@@ -241,7 +240,7 @@ if [[ "$MODE" == "catalog" && -n "${INSTALL_ID:-}" ]]; then
   CFG_CODE="$(curl -s -o /tmp/wisp-e2e-config.json -w '%{http_code}' \
     -X PUT "$BASE/api/v1/admin/plugins/installations/$INSTALL_ID/config" "${AUTH[@]}" \
     -H 'Content-Type: application/json' \
-    -d "{\"key\":\"global\",\"value\":{\"aiostreams_url\":\"$AIO_URL\",\"aiostreams_password\":\"$AIO_PASS\",\"library_path\":\"/library\"}}" 2>/dev/null || true)"
+    -d "{\"key\":\"global\",\"value\":{\"aiostreams_url\":\"$AIO_URL\",\"library_path\":\"/library\"}}" 2>/dev/null || true)"
   [[ "$CFG_CODE" == "200" || "$CFG_CODE" == "204" ]] && pass "plugin configured" \
     || fail "plugin config returned $CFG_CODE"
 
@@ -267,7 +266,7 @@ step "Writing placeholders with the real writer"
 # placeholder.
 docker cp "$HERE/fixture-bin" "$CID:/tmp/fixture" >/dev/null
 docker exec "$CID" /tmp/fixture -root /library -resolver-base "$RESOLVER_BASE" \
-  -aiostreams-url "$AIO_URL" -aiostreams-password "$AIO_PASS" -quality 1080p \
+  -aiostreams-url "$AIO_URL" -quality 1080p \
   > /tmp/wisp-e2e-fixtures.txt 2>/tmp/wisp-e2e-fixture-err.txt \
   && pass "wrote $(wc -l < /tmp/wisp-e2e-fixtures.txt) placeholder(s)" \
   || { fail "fixture write failed: $(head -c 200 /tmp/wisp-e2e-fixture-err.txt)"; exit 1; }

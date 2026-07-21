@@ -108,16 +108,17 @@ func (s *runtimeServer) Configure(ctx context.Context, req *pluginv1.ConfigureRe
 		host = u.Host
 	}
 
-	client := aiostreams.New(next.aioURL, next.aioPassword)
+	client := aiostreams.New(next.aioURL)
 
-	// AIOStreams' Search API needs credentials even though its Stremio routes
-	// do not, and without them every resolution fails with a 401 at the worst
-	// possible moment — when somebody presses play. For the full URL form the
-	// secret is the config blob already in the URL, so no password is needed;
-	// the alias form carries no blob and genuinely requires one.
+	// The Search API needs credentials even though AIOStreams' Stremio routes
+	// do not, and a full manifest URL carries them. A URL that cannot supply
+	// them would fail every lookup with a 401 at the worst possible moment —
+	// when somebody presses play — so it is called out here instead, while
+	// whoever pasted it is still looking at the settings page.
 	if !client.HasCredentials() {
-		s.log.Warn("configure: AIOStreams has no usable credentials — the Search API will reject every lookup with a 401. " +
-			"Set an AIOStreams password, or use the full manifest URL form (/stremio/<id>/<config>/manifest.json), which carries its own secret")
+		s.log.Error("configure: this AIOStreams URL carries no credentials, so every lookup will fail. " +
+			"Use the full manifest URL from the AIOStreams configure page, of the form " +
+			"https://<host>/stremio/<id>/<config>/manifest.json")
 	}
 
 	signer := s.signerFor(ctx, next)
