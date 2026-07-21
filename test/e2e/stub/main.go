@@ -16,6 +16,8 @@
 package main
 
 import (
+	"bytes"
+	_ "embed"
 	"encoding/json"
 	"flag"
 	"log"
@@ -23,7 +25,27 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
+
+// sampleMedia is a one-second h264/aac clip, under 5KB.
+//
+// The stub used to hand out a URL pointing at nothing, which let the test prove
+// a redirect happened and nothing more. The paths that actually OPEN the stream
+// — remux, transcode, seek anchors — broke twice without the suite noticing,
+// because a redirect to a dead URL looks identical to one that works. Serving
+// real media lets the test follow the redirect and check that watchable bytes
+// come back.
+//
+//go:embed sample.mp4
+var sampleMedia []byte
+
+// serveMedia serves the sample with range support, which is what a player and
+// ffmpeg both do first.
+func serveMedia(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "video/mp4")
+	http.ServeContent(w, r, "sample.mp4", time.Time{}, bytes.NewReader(sampleMedia))
+}
 
 // searchResult mirrors the shape AIOStreams returns from /api/v1/search.
 type searchResult struct {
@@ -48,6 +70,9 @@ func main() {
 	flag.Parse()
 
 	mux := http.NewServeMux()
+
+	// The media the resolver points at. Everything downstream opens this.
+	mux.HandleFunc("/media.mp4", serveMedia)
 
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

@@ -36,7 +36,10 @@ BASE="http://127.0.0.1:${SILO_PORT}"
 ADMIN_USER="e2e"
 ADMIN_PASS="e2e-password-123"
 ADMIN_EMAIL="e2e@example.invalid"
-RESOLVED_TARGET="https://cdn.e2e.invalid/movie.mkv?token=e2e"
+# Real media, served by the stub with range support. It used to be a URL
+# pointing at nothing, which let the test prove a redirect happened and nothing
+# more — a redirect to a dead URL looks identical to one that works.
+RESOLVED_TARGET="http://127.0.0.1:${STUB_PORT}/media.mp4?token=e2e"
 AIO_URL="http://127.0.0.1:${STUB_PORT}/stremio/e2e/manifest.json"
 
 MODE="plugin"
@@ -359,11 +362,27 @@ except Exception: print("")' 2>/dev/null)"
       || fail "playback returned $CODE, want 302"
 
     if [[ "$LOC" == "$RESOLVED_TARGET"* ]]; then
-      pass "client was redirected to the resolved external URL"
-    elif [[ "$LOC" == *"127.0.0.1"* || "$LOC" == *"localhost"* ]]; then
-      fail "client was pointed at a host-local address it cannot reach: $LOC"
+      pass "client was redirected to the resolved stream"
     else
       fail "unexpected redirect target: ${LOC:-<none>}"
+    fi
+
+    # Follow it. A redirect to a dead URL looks exactly like a redirect to a
+    # working one, and the paths that actually OPEN the stream — remux,
+    # transcode, seek anchors — broke twice without this suite noticing.
+    BYTES="$(docker exec "$CID" sh -c "curl -s --max-time 20 '$LOC' | wc -c" 2>/dev/null || echo 0)"
+    if [[ "${BYTES:-0}" -gt 1000 ]]; then
+      pass "the resolved stream serves media ($BYTES bytes)"
+    else
+      fail "the resolved stream served ${BYTES:-0} bytes; the redirect leads nowhere"
+    fi
+
+    # And that what comes back is decodable, not merely non-empty.
+    PROBE="$(docker exec "$CID" sh -c "curl -s --max-time 20 -o /tmp/e2e-probe.mp4 '$LOC' && /usr/lib/jellyfin-ffmpeg/ffprobe -v error -show_entries stream=codec_name -of csv=p=0 /tmp/e2e-probe.mp4 2>&1 | tr '\n' ' '; rm -f /tmp/e2e-probe.mp4" 2>/dev/null || true)"
+    if [[ "$PROBE" == *h264* ]]; then
+      pass "the stream decodes as video (${PROBE% })"
+    else
+      fail "the resolved stream did not decode: ${PROBE:-<nothing>}"
     fi
 
     # In plugin mode the redirect proves the whole chain: Silo resolved the
