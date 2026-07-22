@@ -470,16 +470,14 @@ func (r *Resolver) resolveUncached(ctx context.Context, req ResolveRequest) (aio
 		if len(candidates) == 0 {
 			continue
 		}
-		// Rank seekable (debrid-cached) sources ahead of on-demand ones BEFORE
-		// applying the probe budget — otherwise a seekable link AIOStreams
-		// placed behind a run of on-demand hosts is filtered out before it can
-		// ever be probed. The cap comes after the ranking so the budget is
-		// spent on the candidates most likely to actually seek.
-		candidates = rankBySeekability(candidates)
-		if len(candidates) > liveChecks {
-			candidates = candidates[:liveChecks]
-		}
-		if picked, ok := r.firstLive(ctx, candidates, req.Fresh); ok {
+		// Choose which candidates to probe. Ranking must only ADD seekable
+		// sources to the probe set, never evict an on-demand candidate the old
+		// top-down budget would have reached — see probeSet. The AIOStreams top
+		// pick at this tier is the fallback when nothing verifies, matching the
+		// pre-ranking behaviour.
+		fallback := candidates[0]
+		probe := probeSet(candidates)
+		if picked, ok := r.firstLive(ctx, probe, fallback, req.Fresh); ok {
 			trace.VerifyMS = time.Since(verifyStart).Milliseconds()
 			return picked, trace, nil
 		}
@@ -545,6 +543,42 @@ func rankBySeekability(candidates []aiostreams.Stream) []aiostreams.Stream {
 	return append(preferred, rest...)
 }
 
+// probeSet chooses which candidates to liveness-check for a tier, ADDITIVELY:
+// ranking may only widen the probe set, never shrink it below what the old
+// top-down budget reached.
+//
+// The set is the UNION of two things, deduped and kept stable:
+//
+//  1. the first liveChecks candidates in AIOStreams' ORIGINAL order — every
+//     candidate the pre-ranking budget would have probed, so a live on-demand
+//     source can never be evicted by dead debrid links ranked ahead of it; and
+//  2. every seekable (debrid-cached) candidate wherever AIOStreams placed it —
+//     so a genuinely seekable link stranded past the budget is still reached,
+//     which was the whole point of ranking.
+//
+// The union is then ordered seekable-first (a stable partition) so firstLive
+// consumes debrid sources ahead of on-demand ones: the debrid preference still
+// holds whenever those sources are live, but consuming a dead debrid link no
+// longer costs a live on-demand one its probe. The fan-out is bounded by
+// roughly liveChecks + (#seekable) — still a modest, concurrent, one-round-trip
+// check.
+func probeSet(candidates []aiostreams.Stream) []aiostreams.Stream {
+	budget := liveChecks
+	if budget > len(candidates) {
+		budget = len(candidates)
+	}
+	// A single stable pass includes each index at most once, so the union is
+	// deduped without a second structure: an index qualifies if it is within
+	// the original budget OR points at a seekable host.
+	selected := make([]aiostreams.Stream, 0, len(candidates))
+	for i, s := range candidates {
+		if i < budget || isSeekableHost(s.URL) {
+			selected = append(selected, s)
+		}
+	}
+	return rankBySeekability(selected)
+}
+
 // firstLive returns the earliest candidate that is actually serving.
 //
 // The checks run concurrently but the RESULT is taken in rank order, so
@@ -553,15 +587,18 @@ func rankBySeekability(candidates []aiostreams.Stream) []aiostreams.Stream {
 // candidate's timeout, which measured at nearly eight seconds on a title whose
 // top-ranked link was unreachable; in parallel it is one round trip.
 //
-// When nothing verifies, the best candidate is returned anyway rather than
+// When nothing verifies, the supplied fallback is returned anyway rather than
 // failing: an unverified stream may still play, and a definite failure is worse
-// than a probable success.
+// than a probable success. The fallback is AIOStreams' own top pick at the tier
+// — not candidates[0], which is the seekable-first ranking's head — so a run of
+// dead debrid links never turns the unverified guess into something worse than
+// the pre-ranking behaviour would have handed back.
 //
 // A candidate that failed a check within probeFailTTL is skipped on that
 // remembered evidence rather than re-probed — unless fresh demands the
 // re-probe. The expensive outcome is failure, and it recurs: a dead top-ranked
 // candidate would otherwise charge its full timeout to every resolve.
-func (r *Resolver) firstLive(ctx context.Context, candidates []aiostreams.Stream, fresh bool) (aiostreams.Stream, bool) {
+func (r *Resolver) firstLive(ctx context.Context, candidates []aiostreams.Stream, fallback aiostreams.Stream, fresh bool) (aiostreams.Stream, bool) {
 	checkCtx, cancel := context.WithCancel(ctx)
 	// Cancelling on the way out abandons checks still in flight: once the
 	// answer is known, the rest are wasted work against someone's provider.
@@ -609,7 +646,7 @@ func (r *Resolver) firstLive(ctx context.Context, candidates []aiostreams.Stream
 
 	r.log.Warn("resolve: no candidate verified as serving; returning the best one unchecked",
 		"checked", len(candidates))
-	return candidates[0], true
+	return fallback, true
 }
 
 // recentProbeFailure reports whether url failed a liveness check within
@@ -692,12 +729,23 @@ func (r *Resolver) checkLive(ctx context.Context, rawURL string) error {
 		}
 		return nil
 	case http.StatusRequestedRangeNotSatisfiable:
-		// 416: the file is smaller than our 1 MiB probe offset — a genuinely
-		// small release. The server still UNDERSTOOD range semantics (it
-		// rejected an out-of-bounds range instead of ignoring Range and
-		// streaming from byte 0), so seeking works; the offset just happened to
-		// land past the end. Counted as seekable.
-		return nil
+		// 416: the file may be smaller than our 1 MiB probe offset — a genuinely
+		// small release whose server UNDERSTOOD range semantics (it rejected an
+		// out-of-bounds range instead of ignoring Range and streaming from byte
+		// 0). That is seekable. But a 416 can equally come from an expired or
+		// error redirect target rejecting the range for unrelated reasons, and
+		// this is the one place the probe is looser than the old bytes=0-0 check
+		// (which rejected 416 outright). So accept it ONLY with a spec-compliant
+		// unsatisfied-range Content-Range ("bytes */<complete-length>", per
+		// RFC 7233 §4.2) — proof the server actually reasoned about the range —
+		// and reject a bare or malformed 416 as a false seekable signal.
+		cr := strings.ToLower(strings.TrimSpace(resp.Header.Get("Content-Range")))
+		if rest, ok := strings.CutPrefix(cr, "bytes */"); ok {
+			if size, err := strconv.ParseUint(rest, 10, 64); err == nil && size > 0 {
+				return nil
+			}
+		}
+		return fmt.Errorf("416 without a satisfiable-range Content-Range %q", resp.Header.Get("Content-Range"))
 	case http.StatusOK:
 		// 200: the server ignored Range and is streaming the whole file from
 		// byte 0. A player seeking mid-file gets the wrong bytes — this is
