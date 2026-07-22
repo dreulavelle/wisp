@@ -81,6 +81,62 @@ func TestRetargetRewritesAStaleResolverBase(t *testing.T) {
 	}
 }
 
+// The durable fix: a placeholder written under the old numeric base is healed
+// to the stable by-name base on the next Configure, and a second run is a
+// byte-identical no-op (mtime preserved). This is what lets Wisp switch its
+// resolver base to by-name without re-signing or disturbing the library — the
+// token signs the tuple, not the address.
+func TestRetargetRewritesNumericToByNameAndIsIdempotent(t *testing.T) {
+	root := t.TempDir()
+	signer := NewSignerFromSecret("secret-1")
+	item := Item{
+		MediaType: "movie", Title: "The Matrix", Year: 1999,
+		ID: MediaID{SourceTMDB, "603"}, IMDbID: "tt0133093", Quality: "1080p",
+	}
+	// Written under the old, mutable numeric base — a plugins/9 placeholder.
+	path := writeLibraryPlaceholder(t, root, "http://127.0.0.1:8080/api/v1/plugins/9", signer, item)
+
+	// The current writer targets the stable by-name base.
+	const byNameBase = "http://127.0.0.1:8080/api/v1/plugins/by-name/wisp"
+	rewritten, failed, err := RetargetPlaceholders(root, NewWriter(root, byNameBase, signer), nil)
+	if err != nil || rewritten != 1 || failed != 0 {
+		t.Fatalf("first pass: rewritten=%d failed=%d err=%v, want 1/0/nil", rewritten, failed, err)
+	}
+	target := readTarget(t, path)
+	if !strings.HasPrefix(target, byNameBase+"/resolve/") {
+		t.Errorf("target = %q, want the by-name base", target)
+	}
+	// The token still verifies against the same signer: the address moved, the
+	// signed tuple did not.
+	u, _ := url.Parse(target)
+	req, err := ParseResolvePath(u.Path)
+	if err != nil {
+		t.Fatalf("ParseResolvePath() error = %v", err)
+	}
+	req.IMDbID = u.Query().Get("imdb")
+	req.Quality = u.Query().Get("quality")
+	if !signer.Verify(req, u.Query().Get("t")) {
+		t.Error("rewritten by-name token does not verify")
+	}
+
+	// Second pass must be a no-op, mtime included.
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rewritten, failed, err = RetargetPlaceholders(root, NewWriter(root, byNameBase, signer), nil)
+	if err != nil || rewritten != 0 || failed != 0 {
+		t.Fatalf("second pass: rewritten=%d failed=%d err=%v, want 0/0/nil", rewritten, failed, err)
+	}
+	after, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !after.ModTime().Equal(before.ModTime()) {
+		t.Error("an already-by-name placeholder was rewritten on the second pass")
+	}
+}
+
 // An up-to-date file must be left alone — mtime included, because a scanner
 // treats a changed mtime as a changed file and re-ingests it.
 func TestRetargetLeavesCurrentFilesUntouched(t *testing.T) {

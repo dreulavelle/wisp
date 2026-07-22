@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -864,5 +865,184 @@ func TestResolveTracedReportsTimingOnFailure(t *testing.T) {
 	}
 	if trace.SearchMS < 0 {
 		t.Errorf("search time = %d", trace.SearchMS)
+	}
+}
+
+// The whole point of the harder probe: a mid-file range request answered with a
+// real 206 is seekable, and only that is accepted. A 200 (Range ignored,
+// streaming from byte 0) and a 202 (not cached yet) are the two non-seekable
+// answers a bytes=0-0 probe used to wave through, and both must now be rejected.
+func TestCheckLiveRequiresSeekable206(t *testing.T) {
+	cases := []struct {
+		name        string
+		status      int
+		contentRng  string
+		wantSeekabe bool
+	}{
+		{name: "206 with content-range is seekable", status: http.StatusPartialContent, contentRng: "bytes 1048576-1048577/2850685615", wantSeekabe: true},
+		{name: "206 without content-range still seekable", status: http.StatusPartialContent, wantSeekabe: true},
+		{name: "206 with malformed content-range rejected", status: http.StatusPartialContent, contentRng: "chunks 1-2", wantSeekabe: false},
+		{name: "200 range ignored is not seekable", status: http.StatusOK, wantSeekabe: false},
+		{name: "202 not cached yet is not seekable", status: http.StatusAccepted, wantSeekabe: false},
+		{name: "416 with unsatisfied-range content-range is seekable", status: http.StatusRequestedRangeNotSatisfiable, contentRng: "bytes */12345", wantSeekabe: true},
+		{name: "416 without content-range rejected", status: http.StatusRequestedRangeNotSatisfiable, wantSeekabe: false},
+		{name: "416 with a normal (non-unsatisfied) content-range rejected", status: http.StatusRequestedRangeNotSatisfiable, contentRng: "bytes 0-0/12345", wantSeekabe: false},
+		{name: "416 with malformed content-range rejected", status: http.StatusRequestedRangeNotSatisfiable, contentRng: "bytes */notanumber", wantSeekabe: false},
+		{name: "502 bad gateway is not seekable", status: http.StatusBadGateway, wantSeekabe: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotRange string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+				gotRange = req.Header.Get("Range")
+				if tc.contentRng != "" {
+					w.Header().Set("Content-Range", tc.contentRng)
+				}
+				w.WriteHeader(tc.status)
+			}))
+			defer srv.Close()
+
+			err := NewResolver(&stubSearcher{}).checkLive(context.Background(), srv.URL)
+			if tc.wantSeekabe && err != nil {
+				t.Errorf("checkLive() = %v, want seekable (nil)", err)
+			}
+			if !tc.wantSeekabe && err == nil {
+				t.Error("checkLive() = nil, want a rejection")
+			}
+			// The probe must ask from a non-zero offset — a bytes=0-0 request
+			// would prove nothing about seeking.
+			wantRange := "bytes=" + strconv.Itoa(liveCheckRangeStart) + "-" + strconv.Itoa(liveCheckRangeEnd)
+			if gotRange != wantRange {
+				t.Errorf("probe sent Range %q, want %q", gotRange, wantRange)
+			}
+		})
+	}
+}
+
+// rankBySeekability lifts debrid-cached (…/resolve/<provider>/…) sources ahead
+// of on-demand hosts, and does so STABLY — relative order inside each group is
+// AIOStreams' own and must survive untouched.
+func TestRankBySeekabilityStablePartition(t *testing.T) {
+	in := []aiostreams.Stream{
+		{URL: "https://orionoid.com/stream/aaa"},                          // on-demand
+		{URL: "https://torrentio.strem.fun/resolve/alldebrid/tok/x.mkv"},  // seekable
+		{URL: "https://orionoid.com/stream/bbb"},                          // on-demand
+		{URL: "https://torrentio.strem.fun/resolve/realdebrid/tok/y.mkv"}, // seekable
+		{URL: "https://some.host/stream/ccc"},                             // on-demand
+	}
+	got := rankBySeekability(in)
+	want := []string{
+		"https://torrentio.strem.fun/resolve/alldebrid/tok/x.mkv",
+		"https://torrentio.strem.fun/resolve/realdebrid/tok/y.mkv",
+		"https://orionoid.com/stream/aaa",
+		"https://orionoid.com/stream/bbb",
+		"https://some.host/stream/ccc",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("rankBySeekability returned %d candidates, want %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i].URL != want[i] {
+			t.Errorf("position %d = %q, want %q", i, got[i].URL, want[i])
+		}
+	}
+}
+
+// A debrid-resolve URL AIOStreams ranked ahead is picked over an orionoid one.
+// This is the live symptom in miniature: without ranking, liveness alone would
+// keep whichever the addon happened to list first.
+func TestResolvePrefersDebridResolveOverOnDemand(t *testing.T) {
+	r := alwaysLive(NewResolver(&stubSearcher{streams: []aiostreams.Stream{
+		{URL: "https://orionoid.com/stream/tok", Resolution: "1080p"},
+		{URL: "https://torrentio.strem.fun/resolve/alldebrid/tok/movie.mkv", Resolution: "1080p"},
+	}}))
+	got, err := r.Resolve(context.Background(), ResolveRequest{
+		MediaType: "movie", IMDbID: "tt1", Quality: "1080p",
+	})
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	if got.URL != "https://torrentio.strem.fun/resolve/alldebrid/tok/movie.mkv" {
+		t.Errorf("URL = %q, want the debrid-cached candidate ranked ahead", got.URL)
+	}
+}
+
+// The starvation bug: the only seekable source sits past the probe budget behind
+// a run of on-demand hosts. Ranking must pull it into the probed set so it is
+// selected — otherwise the budget is spent entirely on hosts that never seek.
+func TestResolveSelectsSeekableCandidatePastTheBudget(t *testing.T) {
+	var streams []aiostreams.Stream
+	// More on-demand hosts than the probe budget, so without ranking the debrid
+	// link at the end is dropped before it can be probed.
+	for i := 0; i < liveChecks+2; i++ {
+		streams = append(streams, aiostreams.Stream{
+			URL: "https://orionoid.com/stream/" + strconv.Itoa(i), Resolution: "1080p",
+		})
+	}
+	debrid := "https://torrentio.strem.fun/resolve/alldebrid/tok/movie.mkv"
+	streams = append(streams, aiostreams.Stream{URL: debrid, Resolution: "1080p"})
+
+	r := NewResolver(&stubSearcher{streams: streams})
+	// Only the debrid link "seeks"; every on-demand host answers 202-equivalent.
+	r.live = func(_ context.Context, u string) error {
+		if u == debrid {
+			return nil
+		}
+		return errors.New("not cached yet (HTTP 202)")
+	}
+
+	got, err := r.Resolve(context.Background(), ResolveRequest{
+		MediaType: "movie", IMDbID: "tt1", Quality: "1080p",
+	})
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	if got.URL != debrid {
+		t.Errorf("URL = %q, want the seekable debrid candidate rescued from past the budget", got.URL)
+	}
+}
+
+// The inverse of the starvation bug, and the regression the additive probe set
+// guards against: a tier carries several DEAD debrid links ranked ahead of a
+// LIVE on-demand source that the pre-ranking budget would have reached. Ranking
+// must ADD the debrid links to the probe set, never EVICT the live on-demand
+// candidate — the probed set stays a superset of the first liveChecks
+// candidates in AIOStreams' original order. If ranking capped the set at
+// liveChecks after promoting the dead debrid links, the live on-demand source
+// would be dropped and the resolver would fall back to a dead debrid link.
+func TestResolveDoesNotEvictLiveOnDemandForDeadDebrid(t *testing.T) {
+	// AIOStreams order: oD0, oD1, oD2, oD3(live), d0(dead), d1(dead), d2(dead).
+	// The live source sits inside the original budget; the three dead debrid
+	// links get promoted ahead of it by ranking.
+	live := "https://orionoid.com/stream/3"
+	var streams []aiostreams.Stream
+	for i := 0; i < 4; i++ {
+		streams = append(streams, aiostreams.Stream{
+			URL: "https://orionoid.com/stream/" + strconv.Itoa(i), Resolution: "1080p",
+		})
+	}
+	for i := 0; i < 3; i++ {
+		streams = append(streams, aiostreams.Stream{
+			URL: "https://torrentio.strem.fun/resolve/alldebrid/tok/dead" + strconv.Itoa(i) + ".mkv", Resolution: "1080p",
+		})
+	}
+
+	r := NewResolver(&stubSearcher{streams: streams})
+	// Only the deep on-demand source seeks; every debrid link is expired/dead.
+	r.live = func(_ context.Context, u string) error {
+		if u == live {
+			return nil
+		}
+		return errors.New("not cached yet (HTTP 202)")
+	}
+
+	got, err := r.Resolve(context.Background(), ResolveRequest{
+		MediaType: "movie", IMDbID: "tt1", Quality: "1080p",
+	})
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	if got.URL != live {
+		t.Errorf("URL = %q, want the live on-demand source that dead debrid links must not evict", got.URL)
 	}
 }

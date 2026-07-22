@@ -21,7 +21,6 @@ import (
 	publicmanifest "github.com/Silo-Server/silo-plugin-sdk/pkg/pluginsdk/manifest"
 	sdkruntime "github.com/Silo-Server/silo-plugin-sdk/pkg/pluginsdk/runtime"
 	"github.com/Silo-Server/silo-plugin-sdk/pkg/pluginsdk/runtimedefault"
-	"github.com/Silo-Server/silo-plugin-sdk/pkg/pluginsdk/runtimehost"
 
 	"github.com/dreulavelle/wisp/internal/aiostreams"
 	"github.com/dreulavelle/wisp/internal/metadata"
@@ -137,7 +136,7 @@ func (s *runtimeServer) Configure(ctx context.Context, req *pluginv1.ConfigureRe
 	// Requests can only produce placeholders once a library path is known, so
 	// intake is wired here rather than at startup.
 	if next.libraryPath != "" {
-		base := s.resolverBase(ctx)
+		base := s.resolverBase()
 		// Logged because it is baked into every placeholder written from here
 		// on. If it is wrong, the symptom appears much later and far away — a
 		// 404 at playback — so the value belongs in the log at the moment it is
@@ -275,88 +274,27 @@ func hostEvents() plugin.EventPublisher {
 // redirecting a client, so a host-local base is correct here — a client is
 // never sent to this address.
 //
-// Getting the installation id right is not cosmetic. Silo mounts plugin routes
-// at /api/v1/plugins/<installation id>/, that id is a database key, and a
-// placeholder is a durable file: write the wrong one and every placeholder
-// produced from then on 404s the moment somebody presses play, long after the
-// mistake was made.
-func (s *runtimeServer) resolverBase(ctx context.Context) string {
-	host := sdkruntime.Host()
-	if host == nil {
-		s.log.Warn("resolver base: no host connection; placeholder URLs may be wrong",
-			"fallback", fallbackResolverBase)
-		return fallbackResolverBase
-	}
-
-	// The intended mechanism. Silo does not implement it as of v0.10.0 of the
-	// SDK, so this is expected to fail — but preferring it means Wisp picks up
-	// the correct answer for free once Silo does.
-	if info, err := host.GetHostInfo(ctx); err == nil {
-		if base := strings.TrimSpace(info.PluginProxyBaseURL); base != "" {
-			return base
-		}
-	}
-
-	// Fall back to asking which installations exist and finding ourselves in
-	// the list. Wisp authored its own manifest, so it knows its plugin id.
-	if id, err := s.installationID(ctx, host); err == nil {
-		return fmt.Sprintf("%s/api/v1/plugins/%d", internalBaseURL, id)
-	} else {
-		s.log.Error("resolver base: could not determine this plugin's installation id; "+
-			"placeholders will point at the wrong route and fail at playback",
-			"error", err, "fallback", fallbackResolverBase)
-	}
-
-	return fallbackResolverBase
-}
-
-// installationID finds this plugin's own installation id.
-func (s *runtimeServer) installationID(ctx context.Context, host *runtimehost.Client) (int64, error) {
-	installed, err := host.ListInstalledPlugins(ctx)
-	if err != nil {
-		return 0, fmt.Errorf("list installed plugins: %w", err)
-	}
-
-	pluginID := s.manifest.GetPluginId()
-	var found []int64
-	for _, p := range installed {
-		if p.GetPluginId() == pluginID {
-			found = append(found, p.GetInstallationId())
-		}
-	}
-
-	switch len(found) {
-	case 0:
-		return 0, fmt.Errorf("no installation reports plugin id %q", pluginID)
-	case 1:
-		return found[0], nil
-	default:
-		// Two installations of the same plugin are indistinguishable from in
-		// here — the host offers no way to ask "which one am I". Guessing would
-		// silently hand half the placeholders to the wrong instance, so say so
-		// and take the lowest id deterministically rather than at map order.
-		s.log.Warn("resolver base: this plugin is installed more than once; "+
-			"cannot tell which installation this process is",
-			"plugin_id", pluginID, "installation_ids", found, "using", found[0])
-		lowest := found[0]
-		for _, id := range found[1:] {
-			if id < lowest {
-				lowest = id
-			}
-		}
-		return lowest, nil
-	}
+// The base addresses this plugin by its STABLE manifest id
+// (/api/v1/plugins/by-name/wisp/...) rather than its numeric installation id.
+// The numeric id is a database key minted fresh on every plugin upgrade, and a
+// placeholder is a durable file: baking the id in stranded the whole library on
+// the first upgrade (4 -> 8 -> 9), which is exactly what RetargetPlaceholders
+// existed to paper over. The manifest id is authored by Wisp, known locally
+// without asking the host, and survives every reinstall. Silo's fork-owned strm
+// layer translates by-name -> current numeric id at resolve time, so no client
+// or token is affected: the HMAC signs the resolve tuple, not the URL.
+//
+// This deliberately does NOT prefer a host-provided proxy base (the old
+// GetHostInfo path): such a base would carry the mutable numeric id and silently
+// reintroduce the very churn this indirection removes.
+func (s *runtimeServer) resolverBase() string {
+	return fmt.Sprintf("%s/api/v1/plugins/by-name/%s", internalBaseURL, s.manifest.GetPluginId())
 }
 
 // internalBaseURL is where Silo listens inside its own container. Placeholders
 // are resolved by Silo itself rather than fetched by a client, so a loopback
 // address is correct and deliberate.
 const internalBaseURL = "http://127.0.0.1:8080"
-
-// fallbackResolverBase is a last resort when the installation id cannot be
-// determined at all. It is a guess — correct only for the first installation —
-// and every path reaching it logs loudly first.
-const fallbackResolverBase = internalBaseURL + "/api/v1/plugins/1"
 
 func main() {
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
