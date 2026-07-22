@@ -13,7 +13,11 @@ credentials.*
 # ── Build artifacts ────────────────────────────────────────────────────────
 /dist/
 /wisp
-silo-plugin-wisp
+# The compiled plugin binary, wherever `go build` drops it. Anchored so it does
+# NOT swallow the cmd/silo-plugin-wisp/ source directory (a bare pattern would
+# match the dir too, silently hiding every source and test file under it).
+/silo-plugin-wisp
+/cmd/silo-plugin-wisp/silo-plugin-wisp
 *.exe
 *.out
 *.test
