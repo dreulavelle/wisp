@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.2.0](https://github.com/dreulavelle/wisp/compare/v3.1.1...v3.2.0) (2026-07-22)
+
+
+### Features
+
+* **plugin:** seekable source selection + installation-id-independent placeholders ([#62](https://github.com/dreulavelle/wisp/issues/62)) ([0d7934d](https://github.com/dreulavelle/wisp/commit/0d7934d36d74ecdc92760b3e38145303ea80b8d5))
+
 ## [3.1.1](https://github.com/dreulavelle/wisp/compare/v3.1.0...v3.1.1) (2026-07-21)
 
 
